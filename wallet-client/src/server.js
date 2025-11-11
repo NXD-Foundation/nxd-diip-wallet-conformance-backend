@@ -947,6 +947,7 @@ function extractCredentialToken(credentialEnvelope) {
 async function validateSdJwt({ sdJwt, issuerMeta, configurationId, expectedCNonce }, logSessionId) {
   const slog = logSessionId ? makeSessionLogger(logSessionId) : (() => {});
   console.log("[sd-jwt] start validation; configurationId=", configurationId); try { slog("[sd-jwt] start validation", { configurationId }); } catch {}
+  console.log("[sd-jwt] issuer metadata:", JSON.stringify(issuerMeta, null, 2)); try { slog("[sd-jwt] issuer metadata", { issuerMeta }); } catch {}
   // Decode and reconstruct claims (verifies disclosures/digests)
   const decoded = await decodeSdJwt(sdJwt, digest);
   console.log("[sd-jwt] decoded header.alg=", decoded.jwt.header?.alg, "kid=", decoded.jwt.header?.kid); try { slog("[sd-jwt] decoded header", { alg: decoded.jwt.header?.alg, kid: decoded.jwt.header?.kid }); } catch {}
@@ -960,6 +961,7 @@ async function validateSdJwt({ sdJwt, issuerMeta, configurationId, expectedCNonc
   try { hdr = decodeProtectedHeader(jws); } catch {}
   let signatureVerified = false;
   // DID-based signature verification (did:web, did:jwk)
+  console.log("[sd-jwt] hdr.kid=", hdr.kid, "decoded.jwt.payload?.iss=", decoded.jwt.payload?.iss);
   if ((hdr.kid && hdr.kid.startsWith('did:')) || (decoded.jwt.payload?.iss && String(decoded.jwt.payload.iss).startsWith('did:'))) {
     try {
       const didIssuer = (hdr.kid && hdr.kid.split('#')[0]) || String(decoded.jwt.payload.iss);
@@ -986,12 +988,27 @@ async function validateSdJwt({ sdJwt, issuerMeta, configurationId, expectedCNonc
 
   // Verify issuer signature of SD-JWT JWS
   const jwksUrl = issuerMeta?.jwks_uri || (issuerMeta?.credential_issuer ? `${issuerMeta.credential_issuer.replace(/\/$/, '')}/.well-known/jwt-vc-issuer` : null);
+  console.log("[sd-jwt] JWKS URL construction: jwks_uri=", issuerMeta?.jwks_uri, "credential_issuer=", issuerMeta?.credential_issuer, "final jwksUrl=", jwksUrl); try { slog("[sd-jwt] JWKS URL", { jwksUri: issuerMeta?.jwks_uri, credentialIssuer: issuerMeta?.credential_issuer, finalUrl: jwksUrl }); } catch {}
   if (!signatureVerified && jwksUrl) {
     console.log("[sd-jwt] fetching JWKS from:", jwksUrl); try { slog("[sd-jwt] fetching JWKS", { jwksUrl }); } catch {}
     const res = await fetch(jwksUrl);
     console.log("[sd-jwt] JWKS fetch status:", res.status); try { slog("[sd-jwt] JWKS fetch status", { status: res.status }); } catch {}
     if (res.ok) {
-      const body = await res.json();
+      let body;
+      try {
+        const contentType = res.headers.get('content-type') || '';
+        const text = await res.text();
+        if (!text || text.trim().length === 0) {
+          throw new Error('Empty response body from JWKS endpoint');
+        }
+        if (!contentType.includes('application/json') && !text.trim().startsWith('{') && !text.trim().startsWith('[')) {
+          throw new Error(`Invalid content-type for JWKS: ${contentType}, body: ${text.slice(0, 100)}`);
+        }
+        body = JSON.parse(text);
+      } catch (parseErr) {
+        console.error("[sd-jwt] Failed to parse JWKS response:", parseErr?.message || parseErr); try { slog("[sd-jwt] JWKS parse error", { error: parseErr?.message || String(parseErr) }); } catch {}
+        throw new Error(`JWKS parse error: ${parseErr?.message || String(parseErr)}`);
+      }
       const jwks = body.keys ? body : body.jwks ? body.jwks : null;
       console.log("[sd-jwt] JWKS keys count:", jwks?.keys?.length || (Array.isArray(jwks) ? jwks.length : 0)); try { slog("[sd-jwt] JWKS keys count", { count: jwks?.keys?.length || (Array.isArray(jwks) ? jwks.length : 0) }); } catch {}
       if (jwks) {
@@ -1064,6 +1081,7 @@ async function validateSdJwt({ sdJwt, issuerMeta, configurationId, expectedCNonc
 
 async function validateJwtVc({ jwtVc, issuerMeta, apiBase, configurationId, publicJwk }) {
   console.log("[jwt-vc] start validation; configurationId=", configurationId);
+  console.log("[jwt-vc] issuer metadata ", issuerMeta);
   try {
     const hdr = decodeProtectedHeader(jwtVc);
     console.log("[jwt-vc] header.alg=", hdr.alg, "kid=", hdr.kid);
@@ -1101,7 +1119,21 @@ async function validateJwtVc({ jwtVc, issuerMeta, apiBase, configurationId, publ
     const res = await fetch(jwksUrl);
     console.log("[jwt-vc] JWKS fetch status:", res.status);
     if (res.ok) {
-      const jwks = await res.json();
+      let jwks;
+      try {
+        const contentType = res.headers.get('content-type') || '';
+        const text = await res.text();
+        if (!text || text.trim().length === 0) {
+          throw new Error('Empty response body from JWKS endpoint');
+        }
+        if (!contentType.includes('application/json') && !text.trim().startsWith('{') && !text.trim().startsWith('[')) {
+          throw new Error(`Invalid content-type for JWKS: ${contentType}, body: ${text.slice(0, 100)}`);
+        }
+        jwks = JSON.parse(text);
+      } catch (parseErr) {
+        console.error("[jwt-vc] Failed to parse JWKS response:", parseErr?.message || parseErr);
+        throw new Error(`JWKS parse error: ${parseErr?.message || String(parseErr)}`);
+      }
       const keysCount = jwks?.keys?.length || 0;
       console.log("[jwt-vc] JWKS keys count:", keysCount);
       if (!payload) {
@@ -1204,9 +1236,27 @@ async function resolveDidDocument(did) {
     ];
     for (const url of urls) {
       try {
-        const res = await fetch(url);
-        if (res.ok) return res.json();
-      } catch {}
+        const res = await fetch(url, { headers: { accept: 'application/did+json, application/json' } });
+        if (res.ok) {
+          const contentType = res.headers.get('content-type') || '';
+          const text = await res.text();
+          if (!text || text.trim().length === 0) {
+            console.warn(`[did:web] Empty DID document response from ${url}`);
+            continue;
+          }
+          if (!contentType.includes('json') && !text.trim().startsWith('{') && !text.trim().startsWith('[')) {
+            console.warn(`[did:web] Non-JSON DID document response from ${url}: content-type=${contentType}`);
+            continue;
+          }
+          try {
+            return JSON.parse(text);
+          } catch (parseErr) {
+            console.warn(`[did:web] Failed to parse DID document from ${url}:`, parseErr?.message || parseErr);
+          }
+        }
+      } catch (err) {
+        console.warn(`[did:web] Fetch error for ${url}:`, err?.message || err);
+      }
     }
     throw new Error('did:web resolution failed');
   }

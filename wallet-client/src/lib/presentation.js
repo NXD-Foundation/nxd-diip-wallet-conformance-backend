@@ -61,21 +61,28 @@ function decodeJwt(token) {
   return { header, payload };
 }
 
-function buildPresentationSubmission(presentationDefinition, credentialFormat) {
+function buildPresentationSubmission(presentationDefinition, dcqlQuery, credentialFormat) {
+  // Per OpenID4VP spec section 8.1: presentation_submission is ONLY for Presentation Exchange (PEX)
+  // NOT for DCQL queries. DCQL only requires vp_token keyed by credential query IDs.
   if (!presentationDefinition) return undefined;
-  console.log("[present] Building presentation_submission from definition:", presentationDefinition.id);
-  console.log("[present] Input descriptors:", presentationDefinition.input_descriptors?.length || 0);
+  
+  if (presentationDefinition) {
+    console.log("[present] Building presentation_submission from definition:", presentationDefinition.id);
+    console.log("[present] Input descriptors:", presentationDefinition.input_descriptors?.length || 0);
 
-  const inputDescriptors = presentationDefinition.input_descriptors || [];
-  const format = credentialFormat || inferRootFormat(presentationDefinition);
-  const descriptorMap = inputDescriptors.map((d) => ({ id: d.id, format, path: "$.vp_token" }));
+    const inputDescriptors = presentationDefinition.input_descriptors || [];
+    const format = credentialFormat || inferRootFormat(presentationDefinition);
+    const descriptorMap = inputDescriptors.map((d) => ({ id: d.id, format, path: "$.vp_token" }));
 
-  console.log("[present] Descriptor map:", JSON.stringify(descriptorMap, null, 2));
+    console.log("[present] Descriptor map:", JSON.stringify(descriptorMap, null, 2));
 
-  // The verifier expects JSON string in some handlers; keep as string to be safe
-  const submission = { definition_id: presentationDefinition.id || "pd", descriptor_map: descriptorMap };
-  console.log("[present] Built presentation_submission:", JSON.stringify(submission, null, 2));
-  return JSON.stringify(submission);
+    // The verifier expects JSON string in some handlers; keep as string to be safe
+    const submission = { definition_id: presentationDefinition.id || "pd", descriptor_map: descriptorMap };
+    console.log("[present] Built presentation_submission:", JSON.stringify(submission, null, 2));
+    return JSON.stringify(submission);
+  }
+  
+  return undefined;
 }
 
 function inferRootFormat(presentationDefinition) {
@@ -160,8 +167,9 @@ export async function performPresentation({ deepLink, verifierBase, credentialTy
   const nonce = payload.nonce;
   const state = payload.state;
   const presentationDefinition = payload.presentation_definition;
-  console.log("[present] Request payload summary →", { responseMode, hasResponseUri: !!responseUri, hasNonce: !!nonce, hasPD: !!presentationDefinition, state });
-  try { slog("[present] request payload", { responseMode, hasResponseUri: !!responseUri, hasNonce: !!nonce, hasPD: !!presentationDefinition, state }); } catch {}
+  const dcqlQuery = payload.dcql_query;
+  console.log("[present] Request payload summary →", { responseMode, hasResponseUri: !!responseUri, hasNonce: !!nonce, hasPD: !!presentationDefinition, hasDCQL: !!dcqlQuery, state });
+  try { slog("[present] request payload", { responseMode, hasResponseUri: !!responseUri, hasNonce: !!nonce, hasPD: !!presentationDefinition, hasDCQL: !!dcqlQuery, state }); } catch {}
 
   if (!responseUri) throw new Error("Missing response_uri in request");
   if (!nonce) throw new Error("Missing nonce in request");
@@ -248,8 +256,17 @@ export async function performPresentation({ deepLink, verifierBase, credentialTy
   const credentialFormat = isMdoc ? "mso_mdoc" : (vpToken.includes("~") ? "dc+sd-jwt" : "jwt_vc_json");
   console.log("[present] Credential format for submission:", credentialFormat); try { slog("[present] credential format", { format: credentialFormat }); } catch {}
   
-  const presentation_submission = buildPresentationSubmission(presentationDefinition, credentialFormat);
-  if (presentation_submission) { console.log("[present] Built presentation_submission len:", presentation_submission.length); try { slog("[present] submission built", { length: presentation_submission.length }); } catch {} }
+  // Build presentation_submission ONLY if presentation_definition is present (Presentation Exchange)
+  // Per OpenID4VP spec section 8.1: presentation_submission is NOT required for DCQL queries
+  // DCQL only requires vp_token keyed by credential query IDs
+  const presentation_submission = buildPresentationSubmission(presentationDefinition, dcqlQuery, credentialFormat);
+  if (presentation_submission) { 
+    console.log("[present] Built presentation_submission (PEX) len:", presentation_submission.length); 
+    try { slog("[present] PEX submission built", { length: presentation_submission.length }); } catch {} 
+  } else {
+    console.log("[present] No presentation_submission (not PEX flow)"); 
+    try { slog("[present] no PEX submission", {}); } catch {} 
+  }
 
   // Send the credential token (SD-JWT, mdoc DeviceResponse, or JWT VC)
   // Per OpenID4VP spec:
@@ -357,9 +374,12 @@ export async function performPresentation({ deepLink, verifierBase, credentialTy
   
   if (!bodyContent) {
     // Default: direct_post
+    // Per OpenID4VP Section 8.2: response_mode "direct_post"
+    // Parameters are sent as application/x-www-form-urlencoded
     const formParams = new URLSearchParams();
     formParams.append("vp_token", vpToken);
     if (presentation_submission) {
+      // presentation_submission is a JSON object encoded as a string per spec
       formParams.append("presentation_submission", presentation_submission);
     }
     if (state) {
@@ -367,6 +387,10 @@ export async function performPresentation({ deepLink, verifierBase, credentialTy
     }
     bodyContent = formParams.toString();
     contentType = "application/x-www-form-urlencoded";
+    
+    // Debug: log the actual form-encoded body being sent
+    console.log("[present] Form-encoded body preview:", bodyContent.substring(0, 500));
+    console.log("[present] Form params keys:", Array.from(formParams.keys()));
   }
   
   console.log("[present] Posting to response_uri:", responseUri, "body.keys=", Object.keys(body)); try { slog("[present] posting", { responseUri, keys: Object.keys(body) }); } catch {}
@@ -378,6 +402,7 @@ export async function performPresentation({ deepLink, verifierBase, credentialTy
   });
   const resText = await res.text().catch(() => "");
   console.log("[present] Verifier response status:", res.status, "body.len=", resText?.length); try { slog("[present] verifier response", { status: res.status, bodyLen: resText?.length }); } catch {}
+  console.log("[present] Verifier response body:", resText); try { slog("[present] verifier response body", { body: resText }); } catch {}
   console.log("[present] Sent vp_token preview:", vpToken.substring(0, 200) + "...");
   console.log("[present] Sent presentation_submission:", presentation_submission);
   console.log("[present] presentation_submission type:", typeof presentation_submission);
