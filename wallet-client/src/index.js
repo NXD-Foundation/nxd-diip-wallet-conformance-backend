@@ -8,6 +8,77 @@ import { resolveCredentialRequestParams } from "./lib/vci.js";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+async function discoverIssuerMetadata(credentialIssuerBase) {
+  const base = credentialIssuerBase.replace(/\/$/, "");
+  // RFC: if credential_issuer contains a path, well-known URI keeps path suffix
+  let origin, path;
+  try {
+    const u = new URL(base);
+    origin = u.origin;
+    path = u.pathname.replace(/\/$/, "");
+  } catch {
+    origin = base; path = "";
+  }
+  const candidates = [
+    `${origin}/.well-known/openid-credential-issuer${path}`,
+    `${base}/.well-known/openid-credential-issuer`,
+  ];
+  let meta = null; let lastErr = null;
+  for (const url of candidates) {
+    try {
+      const res = await fetch(url);
+      if (res.ok) { meta = await res.json(); break; }
+      lastErr = res.status;
+    } catch (e) { lastErr = e.message || String(e); }
+  }
+  if (!meta) throw new Error(`Issuer metadata fetch error ${lastErr}`);
+  // Normalize property names that can differ across specs/implementations
+  if (!meta.credential_deferred_endpoint && meta.deferred_credential_endpoint) {
+    meta.credential_deferred_endpoint = meta.deferred_credential_endpoint;
+  }
+  // Some issuers expose authorization_servers (array) instead of authorization_server
+  if (!meta.authorization_server && Array.isArray(meta.authorization_servers) && meta.authorization_servers.length > 0) {
+    meta.authorization_server = meta.authorization_servers[0];
+  }
+  return meta;
+}
+
+async function discoverAuthorizationServerMetadata(authorizationServerBase) {
+  // RFC 8414: If issuer has path component, well-known is host + '/.well-known/oauth-authorization-server' + path
+  const baseStr = authorizationServerBase.replace(/\/$/, "");
+  let origin, path;
+  try {
+    const u = new URL(baseStr);
+    origin = u.origin;
+    path = u.pathname.replace(/\/$/, "");
+  } catch {
+    // Not a full URL, fallback to direct
+    origin = baseStr;
+    path = "";
+  }
+
+  const candidates = [
+    `${origin}/.well-known/oauth-authorization-server${path}`,
+    `${origin}/.well-known/openid-configuration${path}`,
+    `${baseStr}/.well-known/oauth-authorization-server`,
+    `${baseStr}/.well-known/openid-configuration`,
+  ];
+
+  let lastErr = null;
+  for (const url of candidates) {
+    try {
+      const res = await fetch(url);
+      if (res.ok) { 
+        return res.json(); 
+      }
+      lastErr = res.status;
+    } catch (e) {
+      lastErr = e.message || String(e);
+    }
+  }
+  throw new Error(`AS metadata fetch error ${lastErr}`);
+}
+
 async function main() {
   const argv = yargs(hideBin(process.argv))
     .option("issuer", { type: "string", default: "http://localhost:3000" })
@@ -47,7 +118,32 @@ async function main() {
   const preAuthorizedCode = preAuthGrant["pre-authorized_code"]; // sessionId
   const txCode = preAuthGrant?.tx_code ? await promptTxCode(preAuthGrant.tx_code) : undefined;
 
-  const tokenEndpoint = `${issuerBase}/token_endpoint`;
+  // Fetch issuer metadata to get token endpoint
+  const apiBase = (credential_issuer || issuerBase).replace(/\/$/, "");
+  const issuerMeta = await discoverIssuerMetadata(apiBase);
+  let tokenEndpoint = issuerMeta.token_endpoint || null;
+  // If token_endpoint is not in issuer metadata, try authorization server metadata per RFC 8414
+  if (!tokenEndpoint && (issuerMeta.authorization_server || (Array.isArray(issuerMeta.authorization_servers) && issuerMeta.authorization_servers.length))) {
+    const asBase = issuerMeta.authorization_server || issuerMeta.authorization_servers[0];
+    try {
+      const asMeta = await discoverAuthorizationServerMetadata(asBase);
+      tokenEndpoint = asMeta.token_endpoint;
+    } catch (e) {
+      console.warn("AS metadata discovery failed:", e?.message || e);
+    }
+  }
+  // If still not found and no authorization_server specified, try issuer's own OAuth well-known endpoints
+  if (!tokenEndpoint && !issuerMeta.authorization_server && !(Array.isArray(issuerMeta.authorization_servers) && issuerMeta.authorization_servers.length)) {
+    try {
+      const asMeta = await discoverAuthorizationServerMetadata(apiBase);
+      tokenEndpoint = asMeta.token_endpoint;
+      console.log("tokenEndpoint discovered via issuer's OAuth metadata:", tokenEndpoint);
+    } catch (e) {
+      console.warn("Issuer OAuth metadata discovery failed:", e?.message || e);
+    }
+  }
+  // Fallback to standard OAuth2 token endpoint
+  tokenEndpoint = tokenEndpoint || `${apiBase}/token`;
   const tokenRes = await httpPostJson(tokenEndpoint, {
     grant_type: "urn:ietf:params:oauth:grant-type:pre-authorized_code",
     "pre-authorized_code": preAuthorizedCode,
@@ -64,7 +160,7 @@ async function main() {
 
   let c_nonce = tokenBody.c_nonce;
   if (!c_nonce) {
-    const nonceEndpoint = `${issuerBase}/nonce`;
+    const nonceEndpoint = issuerMeta.nonce_endpoint || `${apiBase}/nonce`;
     const nonceRes = await httpPostJson(nonceEndpoint, {});
     if (!nonceRes.ok) {
       const err = await nonceRes.json().catch(() => ({}));
@@ -75,22 +171,29 @@ async function main() {
   }
 
   // key management
-  // In CLI mode we don't fetch issuerMeta; default to ES256 or allow override later if needed
-  const { privateJwk, publicJwk } = await ensureOrCreateEcKeyPair(argv.key, "ES256");
+  // Algorithm negotiation
+  const supportedAlgs = issuerMeta?.proof_types_supported?.jwt?.proof_signing_alg_values_supported || issuerMeta?.credential_configurations_supported?.[configurationId]?.proof_types_supported?.jwt?.proof_signing_alg_values_supported || [];
+  const preferredOrder = ["ES256", "ES384", "ES512", "EdDSA"];
+  const selectedAlg = (Array.isArray(supportedAlgs) && supportedAlgs.length)
+    ? (preferredOrder.find((a) => supportedAlgs.includes(a)) || supportedAlgs[0])
+    : "ES256";
+
+  const { privateJwk, publicJwk } = await ensureOrCreateEcKeyPair(argv.key, selectedAlg);
   const didJwk = generateDidJwkFromPrivateJwk(publicJwk);
 
   // build proof JWT
+  const aud = issuerMeta?.credential_issuer || apiBase;
   const proofJwt = await createProofJwt({
     privateJwk,
     publicJwk,
-    audience: issuerBase,
+    audience: aud,
     nonce: c_nonce,
     typ: "openid4vci-proof+jwt",
-    alg: "ES256",
+    alg: selectedAlg,
   });
 
-  // credential request
-  const credentialEndpoint = `${issuerBase}/credential`;
+  // credential request - use endpoint from issuer metadata
+  const credentialEndpoint = issuerMeta.credential_endpoint || `${apiBase}/credential`;
   const credReq = {
     ...requestContext.requestPayload,
     proof: { proof_type: "jwt", jwt: proofJwt },
@@ -109,9 +212,10 @@ async function main() {
     //deferred issuance
     const { transaction_id } = await credRes.json();
     const start = Date.now();
+    const deferredEndpoint = issuerMeta.credential_deferred_endpoint || `${apiBase}/credential_deferred`;
     while (Date.now() - start < argv["poll-timeout"]) {
       await sleep(argv["poll-interval"]);
-      const defRes = await httpPostJson(`${issuerBase}/credential_deferred`, { transaction_id });
+      const defRes = await httpPostJson(deferredEndpoint, { transaction_id });
       if (defRes.ok) {
         const body = await defRes.json();
         // store credential and key-binding material using preAuthorizedCode as session key

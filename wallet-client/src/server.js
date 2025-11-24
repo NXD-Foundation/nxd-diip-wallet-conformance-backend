@@ -525,6 +525,16 @@ async function runPreAuthorizedIssuance({ apiBase, issuerMeta, configurationId, 
       console.warn("[preauth] AS metadata discovery failed:", e?.message || e); try { slog("[preauth] AS metadata discovery failed", { error: e?.message || String(e) }); } catch {}
     }
   }
+  // If still not found and no authorization_server specified, try issuer's own OAuth well-known endpoints
+  if (!tokenEndpoint && !issuerMeta.authorization_server && !(Array.isArray(issuerMeta.authorization_servers) && issuerMeta.authorization_servers.length)) {
+    try {
+      const asMeta = await discoverAuthorizationServerMetadata(apiBase, logSessionId);
+      tokenEndpoint = asMeta.token_endpoint;
+      console.log("[preauth] tokenEndpoint discovered via issuer's OAuth metadata:", tokenEndpoint); try { slog("[preauth] tokenEndpoint discovered via issuer OAuth metadata", { tokenEndpoint }); } catch {}
+    } catch (e) {
+      console.warn("[preauth] Issuer OAuth metadata discovery failed:", e?.message || e); try { slog("[preauth] issuer OAuth metadata discovery failed", { error: e?.message || String(e) }); } catch {}
+    }
+  }
   tokenEndpoint = tokenEndpoint || `${apiBase}/token_endpoint`;
   console.log("[preauth] apiBase=", apiBase, "configurationId=", configurationId); try { slog("[preauth] apiBase", { apiBase, configurationId }); } catch {}
   console.log("[preauth] tokenEndpoint=", tokenEndpoint); try { slog("[preauth] tokenEndpoint", { tokenEndpoint }); } catch {}
@@ -756,7 +766,19 @@ async function runAuthorizationCodeIssuance({ apiBase, issuerMeta, configuration
   const code = redirect.searchParams.get("code");
   if (!code) throw new Error("invalid_response: Authorization code missing");
 
-  let tokenEndpoint = issuerMeta.token_endpoint || tokenEndpointFromAS || `${apiBase}/token_endpoint`;
+  // Use token endpoint from issuer metadata, then from AS metadata (if AS was discovered), then try issuer's own OAuth metadata
+  let tokenEndpoint = issuerMeta.token_endpoint || tokenEndpointFromAS || null;
+  // If still not found and no authorization_server was discovered, try issuer's own OAuth well-known endpoints
+  if (!tokenEndpoint && !issuerMeta.authorization_server && !tokenEndpointFromAS) {
+    try {
+      const asMeta = await discoverAuthorizationServerMetadata(apiBase, logSessionId);
+      tokenEndpoint = asMeta.token_endpoint;
+      console.log("[codeflow] tokenEndpoint discovered via issuer's OAuth metadata:", tokenEndpoint); try { slog("[codeflow] tokenEndpoint discovered via issuer OAuth metadata", { tokenEndpoint }); } catch {}
+    } catch (e) {
+      console.warn("[codeflow] Issuer OAuth metadata discovery failed:", e?.message || e); try { slog("[codeflow] issuer OAuth metadata discovery failed", { error: e?.message || String(e) }); } catch {}
+    }
+  }
+  tokenEndpoint = tokenEndpoint || `${apiBase}/token_endpoint`;
   console.log("[codeflow] apiBase=", apiBase, "configurationId=", configurationId); try { slog("[codeflow] apiBase", { apiBase, configurationId }); } catch {}
   console.log("[codeflow] tokenEndpoint=", tokenEndpoint); try { slog("[codeflow] tokenEndpoint", { tokenEndpoint }); } catch {}
   console.log("[codeflow] requesting token..."); try { slog("[codeflow] requesting token"); } catch {}
