@@ -921,7 +921,7 @@ async function validateAndStoreCredential({ configurationId, credential, issuerM
   // Try SD-JWT first (presence of '~'), else treat as JWT VC; if neither, try mdoc
   if (typeof token === 'string' && token.includes('~')) {
     try { slog("[validate] validating SD-JWT"); } catch {}
-    await validateSdJwt({ sdJwt: token, issuerMeta, configurationId, expectedCNonce: metadata?.c_nonce }, logSessionId);
+    await validateSdJwt({ sdJwt: token, issuerMeta, apiBase, configurationId, expectedCNonce: metadata?.c_nonce }, logSessionId);
   } else if (typeof token === 'string' && token.split('.').length >= 3) {
     try { slog("[validate] validating JWT VC"); } catch {}
     await validateJwtVc({ jwtVc: token, issuerMeta, apiBase, configurationId, publicJwk: keyBinding?.publicJwk });
@@ -966,7 +966,7 @@ function extractCredentialToken(credentialEnvelope) {
   return null;
 }
 
-async function validateSdJwt({ sdJwt, issuerMeta, configurationId, expectedCNonce }, logSessionId) {
+async function validateSdJwt({ sdJwt, issuerMeta, apiBase, configurationId, expectedCNonce }, logSessionId) {
   const slog = logSessionId ? makeSessionLogger(logSessionId) : (() => {});
   console.log("[sd-jwt] start validation; configurationId=", configurationId); try { slog("[sd-jwt] start validation", { configurationId }); } catch {}
   console.log("[sd-jwt] issuer metadata:", JSON.stringify(issuerMeta, null, 2)); try { slog("[sd-jwt] issuer metadata", { issuerMeta }); } catch {}
@@ -1008,9 +1008,34 @@ async function validateSdJwt({ sdJwt, issuerMeta, configurationId, expectedCNonc
     }
   }
 
-  // Verify issuer signature of SD-JWT JWS
-  const jwksUrl = issuerMeta?.jwks_uri || (issuerMeta?.credential_issuer ? `${issuerMeta.credential_issuer.replace(/\/$/, '')}/.well-known/jwt-vc-issuer` : null);
-  console.log("[sd-jwt] JWKS URL construction: jwks_uri=", issuerMeta?.jwks_uri, "credential_issuer=", issuerMeta?.credential_issuer, "final jwksUrl=", jwksUrl); try { slog("[sd-jwt] JWKS URL", { jwksUri: issuerMeta?.jwks_uri, credentialIssuer: issuerMeta?.credential_issuer, finalUrl: jwksUrl }); } catch {}
+  // Discover JWKS URI: first check credential issuer metadata, then authorization server metadata
+  let jwksUrl = issuerMeta?.jwks_uri || null;
+  // If jwks_uri is not in issuer metadata, try authorization server metadata per OID4VCI spec
+  if (!jwksUrl && (issuerMeta.authorization_server || (Array.isArray(issuerMeta.authorization_servers) && issuerMeta.authorization_servers.length))) {
+    const asBase = issuerMeta.authorization_server || issuerMeta.authorization_servers[0];
+    try {
+      const asMeta = await discoverAuthorizationServerMetadata(asBase, logSessionId);
+      jwksUrl = asMeta.jwks_uri;
+      console.log("[sd-jwt] jwks_uri discovered via AS:", jwksUrl); try { slog("[sd-jwt] jwks_uri discovered via AS", { jwksUrl }); } catch {}
+    } catch (e) {
+      console.warn("[sd-jwt] AS metadata discovery failed:", e?.message || e); try { slog("[sd-jwt] AS metadata discovery failed", { error: e?.message || String(e) }); } catch {}
+    }
+  }
+  // If still not found and no authorization_server specified, try issuer's own OAuth well-known endpoints
+  if (!jwksUrl && !issuerMeta.authorization_server && !(Array.isArray(issuerMeta.authorization_servers) && issuerMeta.authorization_servers.length) && apiBase) {
+    try {
+      const asMeta = await discoverAuthorizationServerMetadata(apiBase, logSessionId);
+      jwksUrl = asMeta.jwks_uri;
+      console.log("[sd-jwt] jwks_uri discovered via issuer's OAuth metadata:", jwksUrl); try { slog("[sd-jwt] jwks_uri discovered via issuer OAuth metadata", { jwksUrl }); } catch {}
+    } catch (e) {
+      console.warn("[sd-jwt] Issuer OAuth metadata discovery failed:", e?.message || e); try { slog("[sd-jwt] issuer OAuth metadata discovery failed", { error: e?.message || String(e) }); } catch {}
+    }
+  }
+  // Final fallback: try jwt-vc-issuer well-known endpoint
+  if (!jwksUrl && issuerMeta?.credential_issuer) {
+    jwksUrl = `${issuerMeta.credential_issuer.replace(/\/$/, '')}/.well-known/jwt-vc-issuer`;
+  }
+  console.log("[sd-jwt] JWKS URL construction: jwks_uri=", issuerMeta?.jwks_uri, "credential_issuer=", issuerMeta?.credential_issuer, "authorization_server=", issuerMeta?.authorization_server, "final jwksUrl=", jwksUrl); try { slog("[sd-jwt] JWKS URL", { jwksUri: issuerMeta?.jwks_uri, credentialIssuer: issuerMeta?.credential_issuer, authorizationServer: issuerMeta?.authorization_server, finalUrl: jwksUrl }); } catch {}
   if (!signatureVerified && jwksUrl) {
     console.log("[sd-jwt] fetching JWKS from:", jwksUrl); try { slog("[sd-jwt] fetching JWKS", { jwksUrl }); } catch {}
     const res = await fetch(jwksUrl);
@@ -1133,8 +1158,31 @@ async function validateJwtVc({ jwtVc, issuerMeta, apiBase, configurationId, publ
 
     }
   } catch {}
-  // Validate JWT VC signature using issuer JWKS
-  const jwksUrl = issuerMeta?.jwks_uri || `${apiBase}/jwks`;
+  // Discover JWKS URI: first check credential issuer metadata, then authorization server metadata
+  let jwksUrl = issuerMeta?.jwks_uri || null;
+  // If jwks_uri is not in issuer metadata, try authorization server metadata per OID4VCI spec
+  if (!jwksUrl && (issuerMeta.authorization_server || (Array.isArray(issuerMeta.authorization_servers) && issuerMeta.authorization_servers.length))) {
+    const asBase = issuerMeta.authorization_server || issuerMeta.authorization_servers[0];
+    try {
+      const asMeta = await discoverAuthorizationServerMetadata(asBase, null);
+      jwksUrl = asMeta.jwks_uri;
+      console.log("[jwt-vc] jwks_uri discovered via AS:", jwksUrl);
+    } catch (e) {
+      console.warn("[jwt-vc] AS metadata discovery failed:", e?.message || e);
+    }
+  }
+  // If still not found and no authorization_server specified, try issuer's own OAuth well-known endpoints
+  if (!jwksUrl && !issuerMeta.authorization_server && !(Array.isArray(issuerMeta.authorization_servers) && issuerMeta.authorization_servers.length) && apiBase) {
+    try {
+      const asMeta = await discoverAuthorizationServerMetadata(apiBase, null);
+      jwksUrl = asMeta.jwks_uri;
+      console.log("[jwt-vc] jwks_uri discovered via issuer's OAuth metadata:", jwksUrl);
+    } catch (e) {
+      console.warn("[jwt-vc] Issuer OAuth metadata discovery failed:", e?.message || e);
+    }
+  }
+  // Final fallback: use apiBase/jwks
+  jwksUrl = jwksUrl || `${apiBase}/jwks`;
   let payload = typeof payloadFromDid !== 'undefined' ? payloadFromDid : (typeof payloadFromX5c !== 'undefined' ? payloadFromX5c : undefined);
   if (jwksUrl) {
     console.log("[jwt-vc] fetching JWKS from:", jwksUrl);
