@@ -185,7 +185,7 @@ The issuer/verifier service is built on **Express.js** and follows a modular rou
   - `GET /authorize`: OAuth 2.0 authorization endpoint
   - Dynamic VP request endpoints for various client ID schemes
 
-- **`routes/sharedIssuanceFlows.js`**: Shared OID4VCI v1.0 endpoints
+- **`routes/sharedIssuanceFlows.js`**: Shared OID4VCI Draft 15 endpoints
   - `POST /token_endpoint`: Token endpoint (supports both grant types)
   - `POST /credential`: Credential endpoint (immediate issuance)
   - `POST /credential_deferred`: Deferred credential endpoint (polling)
@@ -260,7 +260,7 @@ This issuer implements **OpenID for Verifiable Credential Issuance (OID4VCI) Dra
 ### Authorization Flows
 
 #### Pre-Authorized Code Flow
-Per OID4VCI v1.0 Section 4.1.1:
+Per OID4VCI Draft 15 Section 4.1.1 (DIIP v4 required):
 
 - **Grant type**: `urn:ietf:params:oauth:grant-type:pre-authorized_code`
 - **Transaction code (PIN) support**: Optional `user_pin_required` with configurable PIN length and input mode
@@ -271,7 +271,7 @@ Per OID4VCI v1.0 Section 4.1.1:
 - **Transaction code validation**: Validates `tx_code` parameter when required
 
 #### Authorization Code Flow
-Per OID4VCI v1.0 Section 4.1.2:
+Per OID4VCI Draft 15 Section 4.1.2 (DIIP v4 required):
 
 - **Grant type**: `authorization_code`
 - **PKCE support**: Full RFC 7636 PKCE (Proof Key for Code Exchange) with `S256` code challenge method
@@ -307,10 +307,10 @@ The issuer supports the following credential formats:
 
 ### Proof-of-Possession (PoP)
 
-Per OID4VCI v1.0 Section 7.2, the issuer implements:
+Per OID4VCI Draft 15 Section 7.2 (DIIP v4 required), the issuer implements:
 
 - **Proof format validation**: Supports both `proof` (singular) and `proofs` (plural) formats
-  - `proofs.jwt` array format per V1.0 specification
+  - `proofs.jwt` array format per OID4VCI Draft 15 specification
   - Legacy `proof.jwt` format support for backward compatibility
 - **Proof type**: `jwt` (JWT-based proof)
 - **Proof signing algorithms**: Validates against `proof_signing_alg_values_supported` from credential configuration
@@ -373,7 +373,7 @@ The issuer supports multiple signature types for credential issuance:
 
 ### Deferred Issuance
 
-Per OID4VCI v1.0 Section 9.2:
+Per OID4VCI Draft 15 Section 9.2:
 
 - **Deferred credential endpoint**: `/credential_deferred` for polling credential status
 - **Transaction ID**: Unique `transaction_id` returned in `202 Accepted` response
@@ -408,7 +408,7 @@ Per RFC 9449:
 
 ### Notification Endpoint
 
-Per OID4VCI v1.0 Section 11:
+Per OID4VCI Draft 15 Section 11:
 
 - **Notification events**: Supports credential lifecycle events:
   - `credential_accepted`: Credential successfully accepted by wallet
@@ -419,7 +419,7 @@ Per OID4VCI v1.0 Section 11:
 
 ### Nonce Endpoint
 
-Per OID4VCI v1.0 Section 8.1:
+Per OID4VCI Draft 15 Section 8.1 (DIIP v4 required):
 
 - **`c_nonce` generation**: Fresh nonce generation for proof-of-possession
 - **Nonce expiration**: Configurable expiration time (default: 86400 seconds)
@@ -430,7 +430,7 @@ Per OID4VCI v1.0 Section 8.1:
 
 For authorization code flows with dynamic credential requests:
 
-- **OpenID4VP support**: Full OpenID for Verifiable Presentations v1.0 support
+- **OpenID4VP support**: Full OpenID for Verifiable Presentations Draft 28 support
 - **VP request formats**: JWT-based VP requests with various client identification schemes
 - **Response modes**: Supports `direct_post` for VP responses
 - **Presentation definition**: Supports Presentation Exchange (PEX) and DCQL query formats
@@ -438,12 +438,12 @@ For authorization code flows with dynamic credential requests:
 
 ### Credential Request Validation
 
-Per OID4VCI v1.0 Section 7.1:
+Per OID4VCI Draft 15 Section 7.1:
 
 - **Credential identifier**: Supports both `credential_configuration_id` and `credential_identifier`
   - Validates that exactly one is provided (not both, not neither)
 - **Proof format**: Supports both `proof` (singular) and `proofs` (plural) object
-  - `proofs.jwt` array format per V1.0 specification
+  - `proofs.jwt` array format per OID4VCI Draft 15 specification
   - Legacy `proof.jwt` format support
 - **Error messages**: Provides detailed error messages with specification references
   - Includes received vs expected values for debugging
@@ -526,7 +526,7 @@ The verifier supports multiple `client_id_scheme` values per OpenID4VP Draft 28:
 
 ### Response Modes
 
-Per OpenID4VP v1.0 Section 6, the verifier supports:
+Per OpenID4VP Draft 28 Section 6, the verifier supports:
 
 - **`direct_post`**: VP token and optional presentation submission in form-encoded POST body
   - Validates `vp_token` parameter
@@ -564,7 +564,7 @@ The verifier supports multiple credential query formats:
 - **JSONPath support**: Uses JSONPath for credential extraction from nested structures
 
 #### Digital Credentials Query Language (DCQL)
-- **Format**: DCQL query format per OpenID4VP v1.0
+- **Format**: DCQL query format per OpenID4VP Draft 28 (DIIP v4 required)
 - **Credential selection**: Supports credential ID, format, and claim path specifications
 - **Metadata filtering**: Supports `vct_values` and `doctype_value` for credential type filtering
 - **Claim paths**: Supports nested claim path specifications (e.g., `["org.iso.18013.5.1", "family_name"]`)
@@ -602,7 +602,7 @@ The verifier accepts and validates the following credential formats:
 
 ### Nonce and State Management
 
-Per OpenID4VP v1.0 Section 5.1:
+Per OpenID4VP Draft 28 Section 5.1:
 
 - **Nonce generation**: Cryptographically random nonce for replay attack prevention
 - **Nonce validation**: Validates nonce in VP token or key-binding JWT
@@ -621,7 +621,7 @@ Per OpenID4VP v1.0 Section 5.1:
 
 ### Wallet Metadata Discovery
 
-Per OpenID4VP v1.0 Section 4.1:
+Per OpenID4VP Draft 28 Section 4.1:
 
 - **Wallet metadata**: Supports `wallet_metadata` parameter in request URI POST requests
 - **JWKS discovery**: Extracts wallet public keys from `wallet_metadata.jwks` for response encryption
@@ -640,7 +640,7 @@ For `direct_post.jwt` and `dc_api.jwt` response modes:
 
 ### Transaction Data
 
-Per OpenID4VP v1.0 Section 5.1.2:
+Per OpenID4VP Draft 28 Section 5.1.2:
 
 - **Transaction data support**: Optional `transaction_data` parameter in authorization requests
 - **Transaction types**: Supports various transaction data types (e.g., `payment_data`, `qes_authorization`)
@@ -667,7 +667,7 @@ Per OpenID4VP v1.0 Section 5.1.2:
 
 ### Key-Binding JWT Verification
 
-Per OpenID4VP v1.0 Section 7.2.2:
+Per OpenID4VP Draft 28 Section 7.2.2:
 
 - **Key-binding JWT extraction**: Extracts `kb-jwt` from SD-JWT token (last segment after `~`)
 - **Nonce validation**: Validates nonce in key-binding JWT payload matches session nonce
@@ -712,7 +712,7 @@ The wallet client is a **wallet-holder** implementation that exercises both VCI 
 ### VCI (Credential Issuance) Capabilities
 
 #### Pre-Authorized Code Flow
-Per OID4VCI v1.0 Section 4.1.1:
+Per OID4VCI Draft 15 Section 4.1.1 (DIIP v4 required):
 
 - **Grant type**: `urn:ietf:params:oauth:grant-type:pre-authorized_code`
 - **Transaction code handling**: Supports `tx_code` parameter when `user_pin_required` is true
@@ -723,7 +723,7 @@ Per OID4VCI v1.0 Section 4.1.1:
 - **Authorization server discovery**: Discovers authorization server metadata per RFC 8414 when separate from credential issuer
 
 #### Authorization Code Flow
-Per OID4VCI v1.0 Section 4.1.2:
+Per OID4VCI Draft 15 Section 4.1.2 (DIIP v4 required):
 
 - **Grant type**: `authorization_code`
 - **PKCE support**: Full RFC 7636 PKCE with `S256` code challenge method
@@ -734,10 +734,10 @@ Per OID4VCI v1.0 Section 4.1.2:
 - **Authorization server discovery**: Discovers separate authorization server metadata when `authorization_servers` array is present
 
 #### Proof-of-Possession (PoP)
-Per OID4VCI v1.0 Section 7.2:
+Per OID4VCI Draft 15 Section 7.2 (DIIP v4 required):
 
 - **Proof type**: `jwt` (JWT-based proof)
-- **Proof format**: Uses `proofs` (plural) format per V1.0 specification
+- **Proof format**: Uses `proofs` (plural) format per OID4VCI Draft 15 specification
 - **Proof signing algorithms**: Supports `ES256`, `ES384`, `ES512`, `EdDSA` with algorithm negotiation
 - **Public key embedding**: Embeds JWK in proof JWT header (`jwk` claim)
 - **DID-based issuer**: Uses `did:jwk:` as proof issuer (`iss` claim)
@@ -771,7 +771,7 @@ Per RFC 9449:
 - **Key attestation embedding**: Embeds WUA in proof JWT header as `key_attestation` claim per spec
 
 #### Credential Request
-Per OID4VCI v1.0 Section 7.1:
+Per OID4VCI Draft 15 Section 7.1:
 
 - **Credential identifier**: Uses `credential_configuration_id` in credential request
 - **Proof format**: Uses `proofs` (plural) object with `jwt` array
@@ -780,7 +780,7 @@ Per OID4VCI v1.0 Section 7.1:
 - **Credential format detection**: Determines format from issuer metadata or credential response
 
 #### Deferred Issuance
-Per OID4VCI v1.0 Section 9.2:
+Per OID4VCI Draft 15 Section 9.2:
 
 - **Transaction ID handling**: Extracts `transaction_id` from `202 Accepted` response
 - **Polling mechanism**: Polls deferred credential endpoint with configurable interval and timeout
@@ -797,7 +797,7 @@ Per OID4VCI v1.0 Section 9.2:
 ### VP (Verifiable Presentation) Capabilities
 
 #### Authorization Request Processing
-Per OpenID4VP v1.0 Section 5:
+Per OpenID4VP Draft 28 Section 5:
 
 - **Deep link parsing**: Parses `openid4vp://` deep links with `request_uri` and `client_id` parameters
 - **Request URI resolution**: Supports both `GET` and `POST` methods for request URI resolution
@@ -806,7 +806,7 @@ Per OpenID4VP v1.0 Section 5:
 - **Request by value**: Handles inline authorization request JWT in deep link
 
 #### Response Mode Support
-Per OpenID4VP v1.0 Section 6:
+Per OpenID4VP Draft 28 Section 6:
 
 - **`direct_post`**: Sends `vp_token` and optional `presentation_submission` in form-encoded POST body
 - **`direct_post.jwt`**: 
@@ -828,7 +828,7 @@ Per OpenID4VP v1.0 Section 6:
   - Supports credential ID, format, and metadata filtering
 
 #### Key-Binding JWT Generation
-Per OpenID4VP v1.0 Section 7.2.2:
+Per OpenID4VP Draft 28 Section 7.2.2:
 
 - **Key-binding JWT**: Generates `openid4vp-proof+jwt` for SD-JWT credentials
 - **Nonce binding**: Includes verifier's `nonce` in key-binding JWT payload
@@ -900,7 +900,7 @@ node src/index.js [--issuer URL] [--offer OFFER_URI] [--fetch-offer PATH] [--cre
   - If `user_pin_required` is true, prompts for transaction code (PIN)
 - Requests a fresh `c_nonce` at nonce endpoint
 - Builds a proof JWT (`ES256`, `jwk` in header, `iss` = did:jwk, `aud` = issuer base URL, `nonce` = `c_nonce`)
-- Calls credential endpoint with `credential_configuration_id` and the proof (using V1.0 `proofs` format)
+- Calls credential endpoint with `credential_configuration_id` and the proof (using OID4VCI Draft 15 `proofs` format)
 - If issuer responds `202` with `transaction_id`, polls deferred credential endpoint until credential is ready
 - Stores issued credential and key binding material in Redis for later use in presentations
 
