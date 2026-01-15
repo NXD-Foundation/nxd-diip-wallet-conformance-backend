@@ -1,53 +1,969 @@
-# EWC Wallet Conformance Backend Service
+# DIIP v4 - Issuer / Verifier / Wallet Service
 
-## Introduction
+A comprehensive Node.js implementation aligned with the **[Decentralized Identity Interop Profile v4 (DIIP v4)](https://fidescommunity.github.io/DIIP/)** specification, implementing **OpenID for Verifiable Credential Issuance (OID4VCI) Draft 15** and **OpenID for Verifiable Presentations (OID4VP) Draft 28**, with additional support for **HAIP (High Assurance Identity Profile)** and **EUDI Wallet ARF (Architecture and Reference Framework)** specifications.
 
-This service implements two crucial RFCs specified by the EU Digital Identity Wallet Consortium (EWC), contributing to the large-scale pilot for the European Digital Identity Wallet as part of the eIDAS 2.0 regulation. By adhering to these RFCs, this service aims to ensure interoperability within the European Digital Identity Wallet Consortium (EWC) Ecosystem, facilitating a standardized approach for both credential issuance and presentation.
+## Overview
 
-### RFCs Implemented
+This project provides a unified backend service implementing three roles, **aligned with the DIIP v4 profile**:
 
-- [**RFC001**](https://github.com/EWC-consortium/eudi-wallet-rfcs/blob/main/ewc-rfc001-issue-verifiable-credential.md): Implements the OID4VCI (OpenID for Verifiable Credential Issuance) workflow for credential issuers.
-- [**RFC002**](https://github.com/EWC-consortium/eudi-wallet-rfcs/blob/main/ewc-rfc002-present-verifiable-credentials.md): Implements the OIDC4VP (OpenID for Verifiable Presentations) workflow for verifiers (relying parties).
+- **Credential Issuer**: DIIP v4-compliant OID4VCI Draft 15 implementation supporting SD-JWT VC credentials (with additional support for JWT VC and mDL/PID)
+- **Credential Verifier**: DIIP v4-compliant OpenID4VP Draft 28 implementation supporting `did` client identification scheme and DCQL/PEX query formats
+- **Wallet Holder**: Companion wallet-holder implementation for exercising all issuer and verifier capabilities
 
-## Features
+The service is **configuration-driven**, allowing new credential types and verifier scenarios to be added primarily through JSON configuration files rather than code changes.
 
-- **Credential Issuance**:  Implements the OID4VCI workflow, ensuring a standardized approach to verifiable credential issuance across any issuer within the EWC Ecosystem. Supports both authorization code flow and pre-authorized code flow for issuing credentials to wallet holders.
-- **Credential Presentation**:  Implements the OIDC4VP workflow, ensuring a standardized approach to verifiable credential presentation across any verifier within the EWC Ecosystem. Facilitates the presentation of credentials by wallet holders to verifiers using both same-device and cross-device verification flows.
-- **Interoperability**: Designed with interoperability at its core, this service promotes seamless integration within the EUDI wallet ecosystem, adhering to the specifications and requirements of the ARF.
+**DIIP v4 Compliance**: This implementation follows the [Decentralized Identity Interop Profile v4 (DIIP v4)](https://fidescommunity.github.io/DIIP/) specification, which defines a minimal set of requirements for interoperable credential issuance and presentation. All DIIP v4 required features are implemented, with additional optional features available for extended use cases.
 
-## Getting Started
+## Standards Compliance
 
-1. Clone the repository:
-   ```bash
-   git clone git@github.com:EWC-consortium/ewc-wallet-conformance-backend.git
-2. Navigate to the project directory:
-   ```bash
-    cd ewc-wallet-conformance-backend
-3. Install dependencies
-   ```bash
-    npm install
-4. Start the service 
-   ```bash
-    npm start
+This implementation is **aligned with DIIP v4** and conforms to the following specifications:
 
-Optionally, if you want to use a tunneling provider for local deployment to ensure https is enabled (which is required by the spec) you can configure your tunnel
-endpoint inside package.json:
-     ```bash
-     "dev": "SERVER_URL=https://4150-2a02-587-8701-de00-c100-84c1-e7c9-8738.ngrok-free.app node server.js" 
+### DIIP v4 Profile Compliance
 
-## Getting Started
-Refer to the individual RFC documentation for detailed usage instructions:
-- [**RFC001**](https://github.com/EWC-consortium/eudi-wallet-rfcs/blob/main/ewc-rfc001-issue-verifiable-credential.md)
-- [**RFC002**](https://github.com/EWC-consortium/eudi-wallet-rfcs/blob/main/ewc-rfc002-present-verifiable-credentials.md)
+This implementation follows the **[Decentralized Identity Interop Profile v4 (DIIP v4)](https://fidescommunity.github.io/DIIP/)** which specifies:
 
-## Contributing
-Contributions to enhance the functionality and interoperability of the wallet provider service are welcome. Please submit pull requests with a clear explanation of your changes or open issues for bugs and feature requests.
+- **Credential Format**: SD-JWT VC (draft 08) and W3C VCDM 2.0
+- **Signature Algorithm**: ES256 (RFC 7518) - **REQUIRED by DIIP v4**
+- **Identifiers**: `did:jwk` and `did:web` - **REQUIRED by DIIP v4**
+- **Issuance Protocol**: OID4VCI Draft 15
+- **Presentation Protocol**: OID4VP Draft 28
+- **Revocation**: IETF Token Status List (Draft 10) - **REQUIRED by DIIP v4**
+- **OID4VP Client Identifier Scheme**: `did` scheme - **REQUIRED by DIIP v4**
+- **OID4VP Request URI Method**: `get` method - **REQUIRED by DIIP v4**
 
-## License
-TBD
+### Core Standards
+
+- **[OID4VCI Draft 15](https://openid.net/specs/openid-4-verifiable-credential-issuance-1_0.html)** - OpenID for Verifiable Credential Issuance
+  - Pre-authorized code flow (Section 4.1.1)
+  - Authorization code flow (Section 4.1.2)
+  - Proof-of-Possession (Section 7.2)
+  - Deferred issuance (Section 9.2)
+  - Notification endpoint (Section 11)
+  - Nonce endpoint (Section 8.1)
+
+- **[OpenID4VP Draft 28](https://openid.net/specs/openid-4-verifiable-presentations-1_0.html)** - OpenID for Verifiable Presentations
+  - JWT Authorization Request (JAR) per RFC 9101
+  - Presentation Exchange (PEX) v2.0.0
+  - Digital Credentials Query Language (DCQL)
+  - Multiple client identification schemes (including `did` scheme required by DIIP v4)
+  - Multiple response modes
+  - Request URI method `get` support (required by DIIP v4)
+
+### Profile Extensions
+
+- **HAIP (High Assurance Identity Profile)**
+  - `haip://` URL scheme for credential offers
+  - Digital Credentials API (`dc_api` and `dc_api.jwt`) response modes
+  - HAIP-specific credential offer endpoints
+  - X.509 certificate-based signing for credentials
+
+- **EUDI Wallet ARF (Architecture and Reference Framework)**
+  - **Wallet Instance Attestation (WIA)** - TS3 specification
+    - WIA JWT validation in token requests
+    - TTL validation (max 24 hours)
+    - Signature verification
+  - **Wallet Unit Attestation (WUA)** - TS3 specification
+    - WUA JWT validation in credential requests
+    - `eudi_wallet_info` structure validation
+    - `attested_keys` array validation
+    - Key attestation embedding in proof JWTs
+
+### Supporting Specifications
+
+- **RFC 9101** - JWT Authorization Request (JAR)
+- **RFC 9126** - Push Authorization Request (PAR)
+- **RFC 9449** - Demonstrating Proof-of-Possession (DPoP)
+- **RFC 7636** - Proof Key for Code Exchange (PKCE)
+- **ISO/IEC 18013-5:2021** - Mobile driving licence (mDL)
+- **DIF Presentation Exchange v2.0.0** - Presentation Exchange format
+
+## Table of Contents
+
+- [Quick Start](#quick-start)
+- [Standards Compliance](#standards-compliance)
+- [DIIP v4 Compliance Summary](#diip-v4-compliance-summary)
+- [Configuration](#configuration)
+- [Architecture](#architecture)
+- [Issuer Capabilities (OID4VCI Draft 15)](#issuer-capabilities-oid4vci-draft-15)
+- [Verifier Capabilities (OpenID4VP Draft 28)](#verifier-capabilities-openid4vp-draft-28)
+- [Wallet Client Capabilities](#wallet-client-capabilities)
+- [Using the Wallet Client](#using-the-wallet-client)
+- [References](#references)
+
+## Quick Start
+
+### Prerequisites
+
+- Node.js (v18 or higher)
+- Redis server (for session and credential storage)
+- npm or yarn
+
+### Installation and Setup
+
+1. **Install dependencies**:
+```bash
+cd diip-v4
+npm install
+```
+
+2. **Start Redis** (if not already running):
+```bash
+redis-server
+```
+
+3. **Start the issuer/verifier service**:
+```bash
+node server.js
+```
+
+The service will start on `http://localhost:3000` by default.
+
+4. **Optional: Set custom server URL** (for HTTPS or tunneling):
+```bash
+SERVER_URL="https://your-public-url.example.com" node server.js
+```
+
+### Test with Wallet Client
+
+In a separate terminal, start the wallet client:
+
+```bash
+cd wallet-client
+npm install
+npm start
+```
+
+The wallet client will start on `http://localhost:4000` by default.
+
+### Example: Issue a Credential
+
+```bash
+# Using wallet client CLI
+cd wallet-client
+node src/index.js --issuer http://localhost:3000 --fetch-offer /offer-no-code --credential VerifiablePortableDocumentA2SDJWT
+```
+
+## Configuration
+
+The service is driven by JSON configuration files:
+
+- **`data/issuer-config.json`**: Defines credential configurations, issuance profiles, and OID4VCI capabilities
+- **`data/verifier-config.json`**: Defines OpenID4VP request templates, presentation definitions, and verifier endpoints
+- **`data/oauth-config.json`**: OAuth 2.0 / OpenID Connect metadata for authorization server
+
+Additional artifacts:
+
+- **OpenAPI description** (`openapi/conformance-backend-endpoint.yaml`, `openapi/wallet-to-wallet-endpoints.yaml`): Exposes key endpoints for conformance tooling
+- **Well-known metadata**: Published via `routes/metadataroutes.js` at standard `.well-known` endpoints
+
+## Architecture
+
+The issuer/verifier service is built on **Express.js** and follows a modular route-based architecture:
+
+### Core Server (`server.js`)
+
+- **Express application**: Main HTTP server running on port 3000 (configurable)
+- **Middleware stack**:
+  - **Body parsing**: Supports JSON, URL-encoded, and raw JWT (`application/jwt`) payloads (up to 10MB)
+  - **Request/response logging**: Comprehensive request/response logging
+  - **Static file serving**: Serves public assets (policy.html, tos.html, logo.png)
+
+### Route Modules
+
+#### Issuance Routes
+
+- **`routes/preAuthSDjwRoutes.js`**: Pre-authorized code flow endpoints
+  - `GET /offer-tx-code`, `GET /offer-no-code`: SD-JWT credential offers (with/without transaction code)
+  - `GET /haip-offer-tx-code`: HAIP profile credential offers
+  - `GET /credential-offer-tx-code/:id`, `GET /credential-offer-no-code/:id`: Credential offer configuration retrieval
+
+- **`routes/codeFlowSdJwtRoutes.js`**: Authorization code flow endpoints for SD-JWT
+  - `GET /offer-code-sd-jwt`: Static authorization code flow offers
+  - `GET /offer-code-sd-jwt-dynamic`: Dynamic authorization code flow offers (requires VP)
+  - `GET /offer-code-defered`: Authorization code flow with deferred issuance
+  - `POST /par`, `POST /authorize/par`: Push Authorization Request (RFC 9126)
+  - `GET /authorize`: OAuth 2.0 authorization endpoint
+  - Dynamic VP request endpoints for various client ID schemes
+
+- **`routes/sharedIssuanceFlows.js`**: Shared OID4VCI v1.0 endpoints
+  - `POST /token_endpoint`: Token endpoint (supports both grant types)
+  - `POST /credential`: Credential endpoint (immediate issuance)
+  - `POST /credential_deferred`: Deferred credential endpoint (polling)
+  - `POST /nonce`: Nonce endpoint (`c_nonce` generation)
+  - `GET /issueStatus`: Session status check endpoint
+
+- **`routes/codeFlowJwtRoutes.js`**: JWT VC authorization code flow routes
+- **`routes/jwtVcRoutes.js`**: JWT VC pre-authorized flow routes
+- **`routes/batchRequestRoutes.js`**: Batch credential request handling
+
+#### Verification Routes
+
+- **`routes/verifierRoutes.js`**: Main OpenID4VP verifier routes
+  - `GET /vp-request/*`: VP request generation for various use cases
+  - `POST /direct_post_vp`, `POST /direct_post_vp_jwt`: VP response handling
+  - Presentation definition and DCQL query processing
+
+- **`routes/didRoutes.js`**: DID-based verifier routes (`did:web` client identification)
+- **`routes/didJwkRoutes.js`**: DID JWK-based verifier routes (`did:jwk` client identification)
+- **`routes/x509Routes.js`**: X.509 certificate-based verifier routes (`x509_san_dns`, `x509_san_uri`, `x509_hash`)
+- **`routes/mdlRoutes.js`**: mDL/PID-specific verification routes
+- **`routes/redirectUriRoutes.js`**: Redirect URI-based client identification routes
+
+#### Use Case Routes
+
+- **`routes/pidroutes.js`**: Personal Identification Document (PID) specific routes
+- **`routes/passportRoutes.js`**: e-Passport routes
+- **`routes/boardingPassRoutes.js`**: Ferry boarding pass routes
+- **`routes/educationalRoutes.js`**: Education ID routes
+- **`routes/paymentRoutes.js`**: Payment-specific routes
+- **`routes/receiptsRoutes.js`**: Receipt credential routes
+- **`routes/didweb.js`**: DID Web resolution routes
+
+#### Metadata & Status Routes
+
+- **`routes/metadataroutes.js`**: Well-known metadata endpoints
+  - `/.well-known/openid-credential-issuer`: Credential issuer metadata
+  - `/.well-known/oauth-authorization-server`: Authorization server metadata
+  - `/.well-known/openid-configuration`: OpenID Connect configuration
+  - `/.well-known/jwt-vc-issuer`: JWT VC issuer metadata
+
+- **`routes/statusListRoutes.js`**: Status list management endpoints
+  - Status list creation, update, and retrieval
+  - Status list index allocation and revocation
+
+### Services
+
+- **`services/cacheServiceRedis.js`**: Redis-backed session and state management
+  - Pre-authorized session storage
+  - Authorization code flow session storage
+  - Deferred issuance transaction tracking
+  - Nonce management (`c_nonce` storage and validation)
+  - VP session storage
+  - Status list management
+
+- **`services/cacheService.js`**: Legacy in-memory cache (fallback)
+
+### Utilities
+
+- **`utils/credGenerationUtils.js`**: Credential generation based on format (SD-JWT, JWT VC, mDL)
+- **`utils/cryptoUtils.js`**: Cryptographic utilities (JWK conversion, nonce generation, DID resolution, VP request building)
+- **`utils/sdjwtUtils.js`**: SD-JWT specific utilities (signing, verification, salt generation)
+- **`utils/tokenUtils.js`**: Token generation utilities (access tokens, ID tokens, VP tokens)
+- **`utils/statusListUtils.js`**: Status list management utilities
+- **`utils/vpHeplers.js`**: Verifiable Presentation helper functions
+- **`utils/personasUtils.js`**: Persona data management
+
+## Issuer Capabilities (OID4VCI Draft 15)
+
+This issuer implements **OpenID for Verifiable Credential Issuance (OID4VCI) Draft 15** (as required by DIIP v4) with the following specification-compliant capabilities:
+
+### Authorization Flows
+
+#### Pre-Authorized Code Flow
+Per OID4VCI v1.0 Section 4.1.1:
+
+- **Grant type**: `urn:ietf:params:oauth:grant-type:pre-authorized_code`
+- **Transaction code (PIN) support**: Optional `user_pin_required` with configurable PIN length and input mode
+- **URL schemes**: Supports both `openid-credential-offer://` (standard) and `haip://` (HAIP profile)
+- **Credential offer delivery**: Via deep links or credential offer URIs
+- **Authorization details**: Supports `authorization_details` parameter for credential selection in token request
+- **Session management**: Redis-backed session storage with configurable TTL
+- **Transaction code validation**: Validates `tx_code` parameter when required
+
+#### Authorization Code Flow
+Per OID4VCI v1.0 Section 4.1.2:
+
+- **Grant type**: `authorization_code`
+- **PKCE support**: Full RFC 7636 PKCE (Proof Key for Code Exchange) with `S256` code challenge method
+- **Dynamic credential requests**: Supports dynamic credential requests requiring Verifiable Presentations
+- **Push Authorization Request (PAR)**: Full RFC 9126 PAR support via `/par` and `/authorize/par` endpoints
+- **Authorization endpoint**: Standard OAuth 2.0 authorization endpoint with `response_type=code`
+- **Client identification**: Multiple `client_id_scheme` values supported (see below)
+- **Issuer state**: Supports `issuer_state` parameter for state management
+
+### Credential Formats
+
+The issuer supports the following credential formats:
+
+**DIIP v4 Compliant Formats:**
+- **`dc+sd-jwt`** (SD-JWT for Verifiable Credentials): Selective disclosure JWT credentials
+  - Uses `@sd-jwt/sd-jwt-vc` library for SD-JWT generation
+  - Supports selective disclosure of claims
+  - Key-binding JWT support for presentation
+  - **DIIP v4 compliant** (SD-JWT VC draft 08)
+- **`vc+sd-jwt`**: VCDM 2.0 compliant SD-JWT credentials
+  - W3C Verifiable Credential Data Model v2.0 structure
+  - Selective disclosure support
+  - **DIIP v4 compliant** (W3C VCDM 2.0 + SD-JWT VC)
+
+**Additional Formats (not required by DIIP v4):**
+- **`jwt_vc_json`**: Standard JWT Verifiable Credentials (W3C VC Data Model)
+  - Plain JWT-based credentials with `vc` claim
+  - Supports various signing algorithms (ES256, RS256)
+- **`mso_mdoc`**: ISO/IEC 18013-5:2021 mDL (mobile Driving License) format
+  - Uses `@auth0/mdl` library for mDL generation
+  - CBOR-encoded credentials with COSE Sign1 signatures
+  - Device key binding support
+
+### Proof-of-Possession (PoP)
+
+Per OID4VCI v1.0 Section 7.2, the issuer implements:
+
+- **Proof format validation**: Supports both `proof` (singular) and `proofs` (plural) formats
+  - `proofs.jwt` array format per V1.0 specification
+  - Legacy `proof.jwt` format support for backward compatibility
+- **Proof type**: `jwt` (JWT-based proof)
+- **Proof signing algorithms**: Validates against `proof_signing_alg_values_supported` from credential configuration
+  - **ES256 is REQUIRED by DIIP v4** and is the default/preferred algorithm
+  - Also supports `ES384`, `ES512`, `EdDSA` (configurable per credential type, not required by DIIP v4)
+- **Public key resolution**:
+  - **JWK in header**: Direct JWK embedding (`jwk` claim in JWT header)
+  - **DID methods**: `did:key:`, `did:jwk:`, `did:web:` with key resolution
+    - `did:key`: Resolves via DID key-to-JWKS conversion
+    - `did:jwk`: Extracts JWK directly from DID identifier
+    - `did:web`: Fetches DID document from `.well-known/did.json` or path-based resolution
+  - **Key identifier**: `kid`-based key resolution for issuer-managed keys
+- **Proof validation**: Full signature verification, nonce validation, and claim validation
+  - Validates `iss` claim (required for authorization code flow, must be omitted for pre-authorized flow)
+  - Validates `aud` claim (must match credential issuer identifier)
+  - Validates `nonce` claim (must match issued `c_nonce`)
+- **Nonce management**: `c_nonce` generation and validation with automatic refresh on proof failure
+  - Nonce stored in Redis with expiration
+  - Nonce deleted after successful proof validation
+  - Nonce validation prioritized before signature verification for better error reporting
+
+### Cryptographic Binding Methods
+
+The issuer supports multiple cryptographic binding methods per credential configuration:
+
+**DIIP v4 Required Methods:**
+- **`did:jwk`**: DID-based binding using `did:jwk:` method - **REQUIRED by DIIP v4**
+- **`did:web`**: DID-based binding using `did:web:` method with DID document resolution - **REQUIRED by DIIP v4**
+
+**Additional Methods (not required by DIIP v4):**
+- **`jwk`**: JWK-based binding with public key in proof JWT header
+- **`did:key`**: DID-based binding using `did:key:` method
+
+### Client Identification Schemes
+
+For authorization code flows, the issuer supports multiple `client_id_scheme` values:
+
+**DIIP v4 Compliant:**
+- **`did:web`**: Client identified by DID Web (`did:web:` method) - **REQUIRED by DIIP v4**
+- **`did:jwk`**: Client identified by DID JWK (`did:jwk:` method) - **REQUIRED by DIIP v4**
+
+**Additional Schemes (not required by DIIP v4):**
+- **`redirect_uri`**: Client identified by redirect URI (no client authentication required)
+- **`x509_san_dns`**: Client identified by X.509 certificate Subject Alternative Name (DNS)
+- **`payment`**: Payment-specific client identification scheme
+
+### Credential Signing
+
+The issuer supports multiple signature types for credential issuance:
+
+**DIIP v4 Compliant:**
+- **`did:web`**: DID Web-based signing with key resolution from DID document - **REQUIRED by DIIP v4**
+- **`did:jwk`**: DID JWK-based signing - **REQUIRED by DIIP v4**
+- **ES256 signature algorithm** - **REQUIRED by DIIP v4** (all signing types use ES256)
+
+**Additional Types (not required by DIIP v4):**
+- **`x509`**: X.509 certificate-based signing (ES256 with certificate chain in `x5c` header)
+- **`jwk`**: JWK-based signing with embedded public key in JWT header
+- **`kid-jwk`**: Key identifier-based signing with issuer-managed key resolution
+
+### Deferred Issuance
+
+Per OID4VCI v1.0 Section 9.2:
+
+- **Deferred credential endpoint**: `/credential_deferred` for polling credential status
+- **Transaction ID**: Unique `transaction_id` returned in `202 Accepted` response
+- **Polling interval**: Configurable polling interval with rate limiting
+- **Status tracking**: Session-based status tracking for deferred credentials
+- **Error handling**: Supports `authorization_pending` and `slow_down` error codes
+
+### Demonstrating Proof-of-Possession (DPoP)
+
+Per RFC 9449:
+
+- **DPoP support**: Optional DPoP header in token requests
+- **Token binding**: Access tokens bound to DPoP public key via `cnf.jkt` claim
+- **Token type**: Returns `DPoP` token type when DPoP proof is validated
+- **Fallback**: Falls back to `Bearer` token type when DPoP is not provided
+- **JWT thumbprint**: Calculates JWK thumbprint (SHA-256) for token confirmation
+
+### Wallet Attestation
+
+**Per EUDI Wallet TS3 Specification**:
+
+- **Wallet Instance Attestation (WIA)**: Optional validation of WIA JWT in token requests
+  - Validates WIA signature, claims (`iss`, `aud`, `iat`, `exp`, `jti`), and expiration
+  - Extracts WIA from `client_assertion` parameter
+  - TTL validation (max 24 hours)
+  - Graceful degradation: continues without attestation if not provided (logs warning)
+- **Wallet Unit Attestation (WUA)**: Optional validation of WUA JWT in credential requests
+  - Validates WUA signature, claims, and expiration
+  - Extracts WUA from proof JWT header `key_attestation` claim
+  - Validates `attested_keys` array and `eudi_wallet_info` structure
+  - Graceful degradation: continues without attestation if not provided (logs warning)
+
+### Notification Endpoint
+
+Per OID4VCI v1.0 Section 11:
+
+- **Notification events**: Supports credential lifecycle events:
+  - `credential_accepted`: Credential successfully accepted by wallet
+  - `credential_failure`: Credential issuance or acceptance failed
+  - `credential_deleted`: Credential deleted by wallet
+- **Authentication**: Bearer token authentication required
+- **Session tracking**: Updates session status based on notification events
+
+### Nonce Endpoint
+
+Per OID4VCI v1.0 Section 8.1:
+
+- **`c_nonce` generation**: Fresh nonce generation for proof-of-possession
+- **Nonce expiration**: Configurable expiration time (default: 86400 seconds)
+- **Cache control**: `Cache-Control: no-store` header for nonce responses
+- **Nonce storage**: Redis-backed nonce storage with expiration
+
+### Verifiable Presentation Support (Dynamic Credential Requests)
+
+For authorization code flows with dynamic credential requests:
+
+- **OpenID4VP support**: Full OpenID for Verifiable Presentations v1.0 support
+- **VP request formats**: JWT-based VP requests with various client identification schemes
+- **Response modes**: Supports `direct_post` for VP responses
+- **Presentation definition**: Supports Presentation Exchange (PEX) and DCQL query formats
+- **ID token support**: Supports `id_token` response type for PID issuance flows
+
+### Credential Request Validation
+
+Per OID4VCI v1.0 Section 7.1:
+
+- **Credential identifier**: Supports both `credential_configuration_id` and `credential_identifier`
+  - Validates that exactly one is provided (not both, not neither)
+- **Proof format**: Supports both `proof` (singular) and `proofs` (plural) object
+  - `proofs.jwt` array format per V1.0 specification
+  - Legacy `proof.jwt` format support
+- **Error messages**: Provides detailed error messages with specification references
+  - Includes received vs expected values for debugging
+
+### Validity and Expiration
+
+**DIIP v4 Required - Validity Checking:**
+
+- **`validFrom` and `validUntil` support**: **REQUIRED by DIIP v4**
+  - Credentials include `validFrom` and `validUntil` claims when issued
+  - Verifiers MUST check validity status using `validFrom` and `validUntil` when specified
+  - Expiration checking is more efficient than revocation mechanisms
+  - All implementations set validity expiration whenever possible for clear communication to Holders and Verifiers
+- **Validity claims**: Credentials include ISO 8601 datetime strings for `validFrom` and `validUntil`
+- **Default validity**: Credentials default to 1 year validity when not explicitly specified
+
+### Status List Support
+
+**DIIP v4 Required - IETF Token Status List (Draft 10):**
+
+- **IETF Token Status List**: Full implementation of IETF Token Status List (Draft 10) - **REQUIRED by DIIP v4**
+  - Status list tokens are JWT tokens containing compressed status lists
+  - Status list tokens use the same issuer and signature type as credentials (aligned status lists)
+  - Status list tokens include `status_list` claim with compressed bit array
+  - Status list tokens support `did:jwk`, `did:web`, and `x509` signature types
+- **Status list creation**: Automatic status list creation per credential type
+- **Status list alignment**: Status lists aligned with issuer keys and signature types (same issuer, same `kid` header)
+- **Index allocation**: Atomic index allocation in Redis to prevent conflicts
+- **Revocation support**: Status list token status updates for credential revocation
+- **Status list endpoints**: 
+  - `GET /status-list/:id` - Returns status list token JWT (Content-Type: `application/statuslist+jwt`)
+  - `POST /status-list` - Create new status list
+  - `PUT /status-list/:id/revoke/:index` - Revoke token at index
+  - `GET /status-list/:id/status/:index` - Check token status
+- **Timeout-based revocation**: Automatic revocation for specific credential types after configurable timeout
+
+## Verifier Capabilities (OpenID4VP Draft 28)
+
+This verifier implements **OpenID for Verifiable Presentations (OpenID4VP) Draft 28** (as required by DIIP v4) with the following specification-compliant capabilities:
+
+### Authorization Request Formats
+
+#### JWT Authorization Request (JAR)
+Per RFC 9101, the verifier supports JWT-secured authorization requests:
+
+- **Request by value**: JWT embedded directly in `request` parameter
+- **Request by reference**: JWT referenced via `request_uri` parameter
+- **Request URI methods**: 
+  - **`get` method - REQUIRED by DIIP v4** (primary method)
+  - Also supports `POST` method (not required by DIIP v4)
+- **JWT signing algorithms**: 
+  - **`ES256` (ECDSA using P-256 and SHA-256) - REQUIRED by DIIP v4** for EC keys
+  - `RS256` (RSA with SHA-256) for RSA keys (legacy, not required by DIIP v4)
+  - `none` (unsigned) for `redirect_uri` client identification scheme (not required by DIIP v4)
+- **Request URI storage**: Stores request URIs with expiration (default: 90 seconds)
+- **Request validation**: Validates JWT signature, claims, and expiration
+
+### Client Identification Schemes
+
+The verifier supports multiple `client_id_scheme` values per OpenID4VP Draft 28:
+
+**DIIP v4 Required:**
+- **`did`** (or `decentralized_identifier`): Client identified by DID - **REQUIRED by DIIP v4**
+  - Supports `did:web` and `did:jwk` methods
+  - Resolves DID documents for `did:web` from `.well-known/did.json` or path-based resolution
+  - Extracts JWK directly from `did:jwk` identifier
+  - Validates verification methods in DID document
+
+**Additional Schemes (not required by DIIP v4):**
+- **`redirect_uri`**: Client identified by redirect URI (no client authentication required)
+  - Used for simple flows without cryptographic client authentication
+  - Request JWT can be unsigned (`alg: none`)
+- **`x509_san_dns`**: Client identified by X.509 certificate Subject Alternative Name (DNS)
+  - Validates certificate SAN DNS against `client_id`
+  - Supports certificate chain validation
+- **`x509_san_uri`**: Client identified by X.509 certificate Subject Alternative Name (URI)
+  - Validates certificate SAN URI against `client_id`
+- **`x509_hash`**: Client identified by X.509 certificate hash (SHA-256)
+  - Validates certificate hash against `client_id`
+
+### Response Modes
+
+Per OpenID4VP v1.0 Section 6, the verifier supports:
+
+- **`direct_post`**: VP token and optional presentation submission in form-encoded POST body
+  - Validates `vp_token` parameter
+  - Validates optional `presentation_submission` parameter
+  - Validates `state` parameter for request/response correlation
+- **`direct_post.jwt`**: Signed JWT response containing VP token, optionally encrypted as JWE
+  - Extracts `response` parameter containing JWT or JWE
+  - Decrypts JWE using verifier's private key when encrypted
+  - Validates JWT signature when signed
+  - Extracts `vp_token` from JWT payload
+  - Validates `nonce` and `state` from JWT payload or encrypted response
+  - Handles both spec-compliant (JWT string) and wallet-specific (payload object) decryption results
+- **`dc_api`**: Digital Credentials API response format (HAIP profile)
+  - Handles HAIP-specific response structures
+  - Supports credential object formats
+- **`dc_api.jwt`**: Digital Credentials API with JWT-encapsulated response (HAIP profile)
+  - Decrypts JWE response using X.509 EC private key
+  - Extracts VP token from encrypted payload
+  - Handles both JWT string and payload object formats
+  - Supports mDL credential extraction from HAIP response structures
+
+### Credential Query Formats
+
+The verifier supports multiple credential query formats:
+
+#### Presentation Exchange (PEX)
+- **Format**: DIF Presentation Exchange v2.0.0
+- **Input descriptors**: Supports multiple input descriptors with format-specific requirements
+- **Presentation submission**: Validates `presentation_submission` with descriptor mapping
+  - Validates `descriptor_map` array structure
+  - Validates descriptor IDs match `input_descriptors` from presentation definition
+  - Validates format compatibility between request and submission
+- **Format support**: `vc+sd-jwt`, `dc+sd-jwt`, `jwt_vc_json`, `jwt_vp`, `mso_mdoc`
+- **Nested credentials**: Supports `path_nested` for nested credential extraction
+- **JSONPath support**: Uses JSONPath for credential extraction from nested structures
+
+#### Digital Credentials Query Language (DCQL)
+- **Format**: DCQL query format per OpenID4VP v1.0
+- **Credential selection**: Supports credential ID, format, and claim path specifications
+- **Metadata filtering**: Supports `vct_values` and `doctype_value` for credential type filtering
+- **Claim paths**: Supports nested claim path specifications (e.g., `["org.iso.18013.5.1", "family_name"]`)
+  - Resolves nested claim paths using deep object traversal
+  - Filters extracted claims based on DCQL query paths
+  - Supports both array and dot-notation path formats
+
+### Credential Formats
+
+The verifier accepts and validates the following credential formats:
+
+**DIIP v4 Compliant Formats:**
+- **`dc+sd-jwt`** / **`vc+sd-jwt`**: Selective Disclosure JWT credentials - **REQUIRED by DIIP v4**
+  - SD-JWT token parsing using `@sd-jwt/decode` library
+  - Disclosure validation and claim extraction
+  - Key-binding JWT (`kb-jwt`) verification
+  - Nonce validation in key-binding JWT
+  - Selective disclosure claim extraction with digest validation
+  - **ES256 signature algorithm** - **REQUIRED by DIIP v4**
+
+**Additional Formats (not required by DIIP v4):**
+- **`jwt_vc_json`**: Standard JWT Verifiable Credentials
+  - JWT signature verification
+  - VC structure validation
+  - Claim extraction from `vc` claim
+  - Support for nested VCs in `verifiableCredential` array
+- **`mso_mdoc`**: ISO/IEC 18013-5:2021 mDL format
+  - CBOR-encoded DeviceResponse parsing
+  - COSE Sign1 signature verification
+  - MSO (Mobile Security Object) validation
+  - Device key binding verification
+  - Selective disclosure support for mDL data elements
+  - Document type validation (`docType` matching)
+  - Session transcript generation for device key binding
+
+### Nonce and State Management
+
+Per OpenID4VP v1.0 Section 5.1:
+
+- **Nonce generation**: Cryptographically random nonce for replay attack prevention
+- **Nonce validation**: Validates nonce in VP token or key-binding JWT
+  - Supports nonce in key-binding JWT payload for SD-JWT credentials
+  - Supports nonce in response JWT payload for `direct_post.jwt` mode
+  - Supports nonce in encrypted response payload
+  - Validates nonce matches session-stored nonce
+- **State parameter**: Session state tracking for request/response correlation
+  - Validates `state` parameter in VP response
+  - Supports `state` in encrypted response payloads
+  - State mismatch detection with detailed error messages
+- **Session management**: Redis-based session storage with expiration
+  - Stores presentation definition, DCQL query, nonce, state, and response mode
+  - Tracks session status (pending, success, failed)
+  - Stores extracted claims and verification results
+
+### Wallet Metadata Discovery
+
+Per OpenID4VP v1.0 Section 4.1:
+
+- **Wallet metadata**: Supports `wallet_metadata` parameter in request URI POST requests
+- **JWKS discovery**: Extracts wallet public keys from `wallet_metadata.jwks` for response encryption
+- **Encryption preferences**: Uses wallet's `authorization_encryption_alg_values_supported` and `authorization_encryption_enc_values_supported`
+- **Metadata validation**: Validates wallet metadata structure and required fields
+
+### Response Encryption
+
+For `direct_post.jwt` and `dc_api.jwt` response modes:
+
+- **JWE encryption**: Decrypts JWT responses using verifier's private key
+- **Encryption algorithms**: Supports `ECDH-ES+A256KW` (key wrapping) and `A256GCM` (content encryption)
+- **Key selection**: Automatically selects decryption key based on JWE header
+- **Decryption handling**: Handles both spec-compliant (JWT string) and wallet-specific (payload object) decryption results
+- **Fallback support**: Gracefully handles different wallet encryption implementations
+
+### Transaction Data
+
+Per OpenID4VP v1.0 Section 5.1.2:
+
+- **Transaction data support**: Optional `transaction_data` parameter in authorization requests
+- **Transaction types**: Supports various transaction data types (e.g., `payment_data`, `qes_authorization`)
+- **Transaction hashes**: Validates transaction data hashes when provided
+- **Payment flows**: Special handling for payment transaction data
+- **Base64URL encoding**: Supports base64url-encoded transaction data in requests
+
+### Claim Extraction and Validation
+
+- **Selective disclosure**: Extracts disclosed claims from SD-JWT credentials
+  - Validates disclosure digests
+  - Extracts claims from disclosures using `@sd-jwt/decode` library
+- **Claim path resolution**: Resolves nested claim paths for DCQL queries
+  - Deep object traversal for nested paths
+  - Supports array and dot-notation path formats
+- **Format-specific extraction**: Handles different claim structures per credential format
+  - SD-JWT: Extracts from disclosures
+  - JWT VC: Extracts from `vc` claim or payload
+  - mDL: Extracts from MSO data elements
+- **Validation**: Validates extracted claims match requested claims from presentation definition or DCQL query
+  - Compares extracted claims against requested input descriptors
+  - Validates DCQL claim paths match extracted claims
+  - Provides detailed error messages for claim mismatches
+
+### Key-Binding JWT Verification
+
+Per OpenID4VP v1.0 Section 7.2.2:
+
+- **Key-binding JWT extraction**: Extracts `kb-jwt` from SD-JWT token (last segment after `~`)
+- **Nonce validation**: Validates nonce in key-binding JWT payload matches session nonce
+- **Signature verification**: Verifies key-binding JWT signature using wallet's public key
+- **Audience validation**: Validates `aud` claim matches verifier's `client_id` or `response_uri`
+- **Issuer validation**: Validates `iss` claim (typically `did:jwk:`)
+- **Format detection**: Automatically detects key-binding JWT presence in SD-JWT tokens
+
+### Session Management
+
+- **Redis-backed storage**: Stores VP sessions with state, nonce, presentation definition, and DCQL query
+- **Status tracking**: Tracks session status (pending, success, failed)
+- **Error storage**: Stores detailed error messages and validation failures
+- **Claim storage**: Stores extracted claims after successful verification
+- **Metadata storage**: Stores mDL metadata and verification details for debugging
+
+## Wallet Client Capabilities
+
+The `wallet-client/` directory contains a VCI + VP **test wallet** implementation that supports both credential issuance (VCI) and presentation (VP) flows per the respective specifications. This wallet is designed to exercise all issuer and verifier scenarios defined in this project.
+
+### Wallet Client Architecture
+
+The wallet client is a **wallet-holder** implementation that exercises both VCI (issuance) and VP (presentation) flows:
+
+- **CLI** (`wallet-client/src/index.js`):
+  - Non-interactive helper to obtain credentials via pre-authorized code flow
+  - Generates proof JWTs, handles `c_nonce` and deferred issuance
+  - Writes issued credentials + key-binding material into Redis
+- **HTTP service** (`wallet-client/src/server.js`):
+  - **`POST /issue`**: VCI pre-authorized flow using `openid-credential-offer://` or `haip://` links
+  - **`POST /issue-codeflow`**: VCI authorization code flow with dynamic VP support
+  - **`POST /present`**: OpenID4VP presentation using `openid4vp://` deep links
+  - **`POST /session`**: Orchestrated test session API for end-to-end flows
+  - **`GET /health`**: Health check endpoint
+  - **`GET /logs/:sessionId`**: Fetch detailed wallet logs for a session
+  - **`GET /session-status/:sessionId`**: Poll session outcome and status
+- **Redis cache** (`wallet-client/src/lib/cache.js`):
+  - Stores credentials by `credential_configuration_id` with key binding material
+  - Stores detailed session logs for inspection
+  - Session data includes status, results, errors, and timestamps
+
+### VCI (Credential Issuance) Capabilities
+
+#### Pre-Authorized Code Flow
+Per OID4VCI v1.0 Section 4.1.1:
+
+- **Grant type**: `urn:ietf:params:oauth:grant-type:pre-authorized_code`
+- **Transaction code handling**: Supports `tx_code` parameter when `user_pin_required` is true
+- **Deep link support**: Handles both `openid-credential-offer://` and `haip://` URL schemes
+- **Credential offer resolution**: Resolves credential offers from deep links or credential offer URIs
+- **Authorization details**: Includes `authorization_details` in token request for credential selection
+- **Metadata discovery**: Discovers issuer metadata from `.well-known/openid-credential-issuer`
+- **Authorization server discovery**: Discovers authorization server metadata per RFC 8414 when separate from credential issuer
+
+#### Authorization Code Flow
+Per OID4VCI v1.0 Section 4.1.2:
+
+- **Grant type**: `authorization_code`
+- **PKCE support**: Full RFC 7636 PKCE with `S256` code challenge method
+- **Push Authorization Request (PAR)**: Supports RFC 9126 PAR when issuer advertises `pushed_authorization_request_endpoint`
+- **Authorization endpoint**: Handles OAuth 2.0 authorization endpoint with `response_type=code`
+- **Dynamic credential requests**: Supports dynamic credential requests requiring Verifiable Presentations
+- **Redirect handling**: Processes authorization redirects with authorization code extraction
+- **Authorization server discovery**: Discovers separate authorization server metadata when `authorization_servers` array is present
+
+#### Proof-of-Possession (PoP)
+Per OID4VCI v1.0 Section 7.2:
+
+- **Proof type**: `jwt` (JWT-based proof)
+- **Proof format**: Uses `proofs` (plural) format per V1.0 specification
+- **Proof signing algorithms**: Supports `ES256`, `ES384`, `ES512`, `EdDSA` with algorithm negotiation
+- **Public key embedding**: Embeds JWK in proof JWT header (`jwk` claim)
+- **DID-based issuer**: Uses `did:jwk:` as proof issuer (`iss` claim)
+- **Nonce handling**: Includes `c_nonce` from issuer in proof JWT payload
+- **Audience validation**: Sets proof audience to credential issuer identifier
+- **Proof type header**: Uses `typ: "openid4vci-proof+jwt"` in proof JWT header
+
+#### Demonstrating Proof-of-Possession (DPoP)
+Per RFC 9449:
+
+- **DPoP generation**: Generates DPoP proof JWT for token endpoint requests
+- **HTTP method binding**: Includes `htm` (HTTP method) and `htu` (HTTP URI) in DPoP payload
+- **URI normalization**: Normalizes token endpoint URI per RFC 9449 Section 4.2
+- **Key binding**: Uses separate key pair for DPoP (different from proof-of-possession key)
+- **Token type detection**: Handles `DPoP` token type in token response
+
+#### Wallet Attestation
+
+**Per EUDI Wallet TS3 Specification**:
+
+- **Wallet Instance Attestation (WIA)**: Generates WIA JWT for token endpoint and PAR requests
+  - Includes `iss`, `aud`, `iat`, `exp`, `jti` claims
+  - JWK in header for key resolution
+  - TTL limited to 24 hours (default: 1 hour)
+  - Uses `did:jwk:` as issuer identifier
+- **Wallet Unit Attestation (WUA)**: Generates WUA JWT for credential endpoint requests
+  - Includes `eudi_wallet_info` with general info and key storage info
+  - Includes `attested_keys` array with attested public keys
+  - Optional `status` claim for revocation information
+  - TTL up to 24 hours
+- **Key attestation embedding**: Embeds WUA in proof JWT header as `key_attestation` claim per spec
+
+#### Credential Request
+Per OID4VCI v1.0 Section 7.1:
+
+- **Credential identifier**: Uses `credential_configuration_id` in credential request
+- **Proof format**: Uses `proofs` (plural) object with `jwt` array
+- **Access token**: Includes Bearer token in Authorization header
+- **Algorithm negotiation**: Selects proof signing algorithm based on issuer's `proof_signing_alg_values_supported`
+- **Credential format detection**: Determines format from issuer metadata or credential response
+
+#### Deferred Issuance
+Per OID4VCI v1.0 Section 9.2:
+
+- **Transaction ID handling**: Extracts `transaction_id` from `202 Accepted` response
+- **Polling mechanism**: Polls deferred credential endpoint with configurable interval and timeout
+- **Polling interval**: Configurable polling interval (default: 2 seconds)
+- **Polling timeout**: Configurable timeout (default: 30 seconds)
+- **Status tracking**: Tracks deferred issuance status until credential is ready
+
+#### Credential Storage
+- **Redis-backed storage**: Stores credentials by `credential_configuration_id`
+- **Key binding material**: Stores private JWK, public JWK, and `did:jwk` identifier with each credential
+- **Metadata storage**: Stores credential metadata including `c_nonce`, expiration, and issuer identifier
+- **TTL management**: Configurable TTL for credential storage (default: 86400 seconds)
+
+### VP (Verifiable Presentation) Capabilities
+
+#### Authorization Request Processing
+Per OpenID4VP v1.0 Section 5:
+
+- **Deep link parsing**: Parses `openid4vp://` deep links with `request_uri` and `client_id` parameters
+- **Request URI resolution**: Supports both `GET` and `POST` methods for request URI resolution
+- **JWT authorization request**: Decodes and validates JWT-secured authorization requests (JAR)
+- **Request by reference**: Fetches authorization request JWT from `request_uri`
+- **Request by value**: Handles inline authorization request JWT in deep link
+
+#### Response Mode Support
+Per OpenID4VP v1.0 Section 6:
+
+- **`direct_post`**: Sends `vp_token` and optional `presentation_submission` in form-encoded POST body
+- **`direct_post.jwt`**: 
+  - Builds signed JWT response containing VP token
+  - Encrypts to JWE when verifier provides JWKS in `client_metadata`
+  - Uses wallet's encryption preferences from `authorization_encryption_alg_values_supported` and `authorization_encryption_enc_values_supported`
+  - Includes `iss`, `aud`, `iat`, `exp`, `nonce`, `state` claims in response JWT
+- **`dc_api`** / **`dc_api.jwt`**: Supports Digital Credentials API response formats (HAIP profile)
+
+#### Credential Query Formats
+
+- **Presentation Exchange (PEX)**: 
+  - Processes `presentation_definition` from authorization request
+  - Builds `presentation_submission` with descriptor mapping
+  - Validates input descriptors against presented credentials
+- **Digital Credentials Query Language (DCQL)**:
+  - Processes `dcql_query` from authorization request
+  - Extracts requested claims using nested claim paths
+  - Supports credential ID, format, and metadata filtering
+
+#### Key-Binding JWT Generation
+Per OpenID4VP v1.0 Section 7.2.2:
+
+- **Key-binding JWT**: Generates `openid4vp-proof+jwt` for SD-JWT credentials
+- **Nonce binding**: Includes verifier's `nonce` in key-binding JWT payload
+- **Audience**: Sets audience to verifier's `client_id` or `response_uri`
+- **Issuer**: Uses `did:jwk:` as key-binding JWT issuer
+- **SD-JWT attachment**: Appends key-binding JWT as `kb-jwt` segment to SD-JWT token
+
+#### Credential Format Handling
+
+- **SD-JWT / DC+SD-JWT**:
+  - Extracts SD-JWT token from various issuer response envelopes
+  - Attaches key-binding JWT to SD-JWT token
+  - Handles selective disclosure disclosures
+- **JWT VC**:
+  - Uses JWT VC tokens as-is for presentation
+  - Supports `jwt_vc_json` format in presentation submission
+- **mso_mdoc / mDL**:
+  - Detects mDL credentials from stored format
+  - Constructs proper `DeviceResponse` structure per ISO/IEC 18013-5:2021
+  - Wraps `IssuerSigned` in `DeviceResponse` with `version`, `documents`, and `status`
+  - CBOR-encodes DeviceResponse for presentation
+  - Sets `format: "mso_mdoc"` in presentation submission
+
+#### Credential Selection
+
+- **Type-based selection**: Selects credential by `credential_configuration_id` or credential type
+- **Automatic inference**: Infers credential type from presentation definition or DCQL query when not specified
+- **Credential listing**: Lists available credential types from wallet storage
+- **Format detection**: Automatically detects credential format (SD-JWT, JWT VC, mDL) from stored credential
+
+#### Wallet Metadata
+
+- **Metadata provision**: Optionally provides `wallet_metadata` in request URI POST requests
+- **JWKS publication**: Can provide wallet public keys via `wallet_metadata.jwks` for response encryption
+- **Encryption preferences**: Advertises supported encryption algorithms and methods
+
+## Using the Wallet Client
+
+The wallet client can be used in two modes:
+
+#### CLI Mode (Quick Start)
+
+For a simple pre-authorized SD-JWT issuance:
+
+```bash
+# in another terminal
+cd wallet-client
+npm install
+
+# Example: use a pre-authorized offer from the issuer
+node src/index.js --issuer http://localhost:3000 --fetch-offer /offer-no-code --credential VerifiablePortableDocumentA2SDJWT
+```
+
+**CLI Options:**
+```bash
+node src/index.js [--issuer URL] [--offer OFFER_URI] [--fetch-offer PATH] [--credential ID] [--key PATH]
+```
+
+- **--issuer**: Base URL of issuer (default: `http://localhost:3000`)
+- **--offer**: Deep link `openid-credential-offer://?...` from issuer
+- **--fetch-offer**: Issuer path to fetch an offer
+- **--credential**: Desired `credential_configuration_id` (defaults to first in offer)
+- **--key**: Optional path to an EC P-256 private JWK. If omitted, a new key is generated in-memory.
+
+**What the CLI does:**
+- Resolves the credential offer URI and downloads the offer JSON
+- For **pre-authorized flow**:
+  - Exchanges the pre-authorized code at token endpoint to get `access_token`
+  - If `user_pin_required` is true, prompts for transaction code (PIN)
+- Requests a fresh `c_nonce` at nonce endpoint
+- Builds a proof JWT (`ES256`, `jwk` in header, `iss` = did:jwk, `aud` = issuer base URL, `nonce` = `c_nonce`)
+- Calls credential endpoint with `credential_configuration_id` and the proof (using V1.0 `proofs` format)
+- If issuer responds `202` with `transaction_id`, polls deferred credential endpoint until credential is ready
+- Stores issued credential and key binding material in Redis for later use in presentations
+
+#### Server Mode (Full Wallet Flows)
+
+Start the wallet service:
+
+```bash
+cd wallet-client
+npm install
+npm start
+```
+
+Once running (default `http://localhost:4000`), you can:
+
+- **Drive issuance**:
+  - **`POST /issue`** for pre-authorized flows
+  - **`POST /issue-codeflow`** for authorization code flows
+- **Drive presentation**:
+  - **`POST /present`** for OpenID4VP requests
+- **Use orchestrated sessions for tests**:
+  - **`POST /session`** to run end-to-end VCI or VP flows
+  - **`GET /session-status/:sessionId`** to poll session outcome
+  - **`GET /logs/:sessionId`** to fetch detailed wallet logs
+
+This makes `wallet-client` a **comprehensive test wallet** that exercises all issuer and verifier scenarios defined in the rest of the project (credential formats, flows, response modes, client_id_schemes, and attestation mechanisms), while remaining clearly non-production and focused on conformance experimentation.
+
+## DIIP v4 Compliance Summary
+
+This implementation is **aligned with DIIP v4** and implements all required features:
+
+✅ **Credential Format**: SD-JWT VC (draft 08) and W3C VCDM 2.0 (`dc+sd-jwt`, `vc+sd-jwt`)  
+✅ **Signature Algorithm**: ES256 (RFC 7518) - required and default  
+✅ **Identifiers**: `did:jwk` and `did:web` - fully supported  
+✅ **Issuance Protocol**: OID4VCI Draft 15 - pre-authorized and authorization code flows  
+✅ **Presentation Protocol**: OID4VP Draft 28 - JAR, PEX, DCQL  
+✅ **Revocation**: IETF Token Status List (Draft 10) - fully implemented  
+✅ **OID4VP Client Identifier Scheme**: `did` scheme - supported via `decentralized_identifier`  
+✅ **OID4VP Request URI Method**: `get` method - supported (also supports `post`)  
+
+**Additional Features** (beyond DIIP v4 requirements):
+- Support for `jwt_vc_json` and `mso_mdoc` credential formats
+- Support for additional signature algorithms (ES384, ES512, EdDSA)
+- Support for `did:key` identifier method
+- Support for additional client identification schemes (`redirect_uri`, `x509_*`)
+- HAIP profile support
+- EUDI Wallet ARF (WIA/WUA) support
 
 ## References
 
-1. OpenID Foundation: [OpenID for Verifiable Credential Issuance (OID4VCI)](https://openid.net/specs/openid-4-verifiable-credential-issuance-1_0-12.html)
-2. OpenID Foundation: [OpenID for Verifiable Presentations (OID4VP)](https://openid.net/specs/openid-4-verifiable-presentations-1_0.html )
-3. European Commission: [The European Digital Identity Wallet Architecture and Reference Framework (ARF)](https://github.com/eu-digital-identity-wallet/eudi-doc-architecture-and-reference-framework/releases)
+- **DIIP v4**: [Decentralized Identity Interop Profile v4](https://fidescommunity.github.io/DIIP/)
+- **OID4VCI**: [OpenID for Verifiable Credential Issuance Draft 15](https://openid.net/specs/openid-4-verifiable-credential-issuance-1_0.html)
+- **OpenID4VP**: [OpenID for Verifiable Presentations Draft 28](https://openid.net/specs/openid-4-verifiable-presentations-1_0.html)
+- **SD-JWT VC**: [SD-JWT-based Verifiable Credentials draft 08](https://datatracker.ietf.org/doc/draft-ietf-oauth-sd-jwt-vc/)
+- **W3C VCDM**: [Verifiable Credentials Data Model v2.0](https://www.w3.org/TR/vc-data-model-2.0/)
+- **IETF Token Status List**: [Token Status List Draft 10](https://datatracker.ietf.org/doc/draft-ietf-oauth-status-list/)
+- **did:jwk**: [did:jwk Method Specification](https://github.com/quicker-js/did-jwk)
+- **did:web**: [did:web Method Specification](https://w3c-ccg.github.io/did-method-web/)
+- **RFC 9101**: [JWT Authorization Request (JAR)](https://www.rfc-editor.org/rfc/rfc9101.html)
+- **RFC 9126**: [Push Authorization Request (PAR)](https://www.rfc-editor.org/rfc/rfc9126.html)
+- **RFC 9449**: [Demonstrating Proof-of-Possession (DPoP)](https://www.rfc-editor.org/rfc/rfc9449.html)
+- **RFC 7636**: [Proof Key for Code Exchange (PKCE)](https://www.rfc-editor.org/rfc/rfc7636.html)
+- **RFC 7518**: [JSON Web Algorithms (JWA) - ES256](https://www.rfc-editor.org/rfc/rfc7518.html)
+- **EUDI Wallet ARF**: [Architecture and Reference Framework](https://github.com/eu-digital-identity-wallet/eudi-doc-architecture-and-reference-framework/releases)
+- **HAIP**: [OpenID4VC High Assurance Interoperability Profile](https://openid.net/specs/openid-4-verifiable-credential-issuance-haip-1_0.html)
+- **ISO/IEC 18013-5:2021**: [Mobile driving licence (mDL)](https://www.iso.org/standard/69084.html)
