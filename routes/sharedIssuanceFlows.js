@@ -32,6 +32,8 @@ import {
   storeNonce,
   checkNonce,
   deleteNonce,
+  checkAndSetPollTime,
+  clearPollTime,
 } from "../services/cacheServiceRedis.js";
 
 import * as jose from "jose";
@@ -129,8 +131,7 @@ async function markSessionFailed(
 
 sharedRouter.post("/token_endpoint", async (req, res) => {
   // Fetch the Authorization header
-  const authorizationHeader = req.headers["authorization"]; // Fetch the 'Authorization' header
-  // console.log("token_endpoint authorizatiotn header-" + authorizationHeader);
+  const authorizationHeader = req.headers["authorization"];
   const body = req.body;
   let authorizationDetails = body.authorization_details;
 
@@ -138,24 +139,19 @@ sharedRouter.post("/token_endpoint", async (req, res) => {
   const pop = req.headers["OAuth-Client-Attestation-PoP"];
 
   //pre-auth code flow
-  const preAuthorizedCode = req.body["pre-authorized_code"]; // req.body["pre-authorized_code"]
+  const preAuthorizedCode = req.body["pre-authorized_code"];
   const tx_code = req.body["tx_code"];
-  
-
-
 
   // check if for this auth session we are issuing a PID credential to validate the WUA and PoP
   if (preAuthorizedCode) {
     let existingPreAuthSession = await getPreAuthSession(preAuthorizedCode);
-    //TODO validatte WUA and PoP
+    //TODO validate WUA and PoP
     if (existingPreAuthSession && existingPreAuthSession.isPID) {
       console.log("pid issuance detected will check WUA and PoP");
       console.log(clientAttestation);
       console.log(pop);
     }
   }
-
- 
 
   //code flow
   const grantType = req.body.grant_type;
@@ -164,7 +160,34 @@ sharedRouter.post("/token_endpoint", async (req, res) => {
   const code_verifier = req.body["code_verifier"];
   const redirect_uri = req.body["redirect_uri"];
 
-  let generatedAccessToken = buildAccessToken(serverURL, privateKey);
+  // VCI v1.0: DPoP support - extract DPoP header and create bound tokens
+  let dpopCnf = null;
+  const dpopHeader = req.headers["dpop"];
+  if (typeof dpopHeader === "string") {
+    try {
+      // Per RFC 9449, the public key used for DPoP is carried in the JWS header as "jwk"
+      const protectedHeader = jose.decodeProtectedHeader(dpopHeader);
+      if (protectedHeader && protectedHeader.jwk) {
+        const jkt = await jose.calculateJwkThumbprint(
+          protectedHeader.jwk,
+          "sha256"
+        );
+        dpopCnf = { jkt };
+        console.log("[TOKEN] DPoP header validated, issuing DPoP-bound token");
+      } else {
+        console.log("[TOKEN] [WARN] DPoP header present but missing 'jwk'; issuing Bearer access token");
+      }
+    } catch (e) {
+      console.error("[TOKEN] Invalid DPoP proof:", e.message);
+      return res.status(400).json({
+        error: "invalid_dpop_proof",
+        error_description: `Invalid DPoP proof: ${e.message}`,
+      });
+    }
+  }
+
+  // Build access token with optional DPoP binding
+  let generatedAccessToken = buildAccessToken(serverURL, privateKey, dpopCnf);
 
   if (!(code || preAuthorizedCode)) {
     // RFC6749 Section 5.2: invalid_request
@@ -180,6 +203,25 @@ sharedRouter.post("/token_endpoint", async (req, res) => {
       let chosenCredentialConfigurationId = null;
       let existingPreAuthSession = await getPreAuthSession(preAuthorizedCode);
 
+      // VCI v1.0: Check if authorization is still pending external completion
+      if (existingPreAuthSession && existingPreAuthSession.status === 'pending_external') {
+        // Atomically check and set poll time using Redis (thread-safe)
+        const minPollIntervalSeconds = 5;
+        const pollAllowed = await checkAndSetPollTime(preAuthorizedCode, minPollIntervalSeconds);
+        
+        if (!pollAllowed) {
+          return res.status(400).json({
+            error: "slow_down",
+            error_description: "Polling too frequently. Please wait at least 5 seconds between requests.",
+          });
+        }
+        
+        // Return authorization_pending error
+        return res.status(400).json({
+          error: "authorization_pending",
+          error_description: "Authorization is still pending. Please try again later.",
+        });
+      }
 
       if(existingPreAuthSession && existingPreAuthSession.tx_code && existingPreAuthSession.tx_code !== tx_code){
         await markSessionFailed(existingPreAuthSession, "pre-auth", { preAuthsessionKey: preAuthorizedCode });
@@ -189,8 +231,6 @@ sharedRouter.post("/token_endpoint", async (req, res) => {
             "The wallet provided an invalid 'tx_code' parameter.",
         });
       }
-    
-
 
       if (existingPreAuthSession) {
         //Credential Issuers MAY support requesting authorization to issue a Credential using the
@@ -260,16 +300,17 @@ sharedRouter.post("/token_endpoint", async (req, res) => {
         const cNonceForSession = generateNonce(); // Generate c_nonce here to ensure it's in session and response
         existingPreAuthSession.c_nonce = cNonceForSession;
 
+        // Clear poll tracking for successful issuance
+        await clearPollTime(preAuthorizedCode);
+
         storePreAuthSession(preAuthorizedCode, existingPreAuthSession);
 
-        // Prepare response, ensuring c_nonce is consistent
+        // VCI v1.0: Prepare response with DPoP-aware token_type
         const tokenResponse = {
           access_token: generatedAccessToken,
           refresh_token: generateRefreshToken(),
-          token_type: "bearer",
+          token_type: dpopCnf ? "DPoP" : "bearer",
           expires_in: 86400,
-          // c_nonce: cNonceForSession, // Use the c_nonce stored in session
-          // c_nonce_expires_in: 86400,
         };
         if (authorizationDetails) {
           parsedAuthDetails.credential_identifiers = [
@@ -345,14 +386,12 @@ sharedRouter.post("/token_endpoint", async (req, res) => {
             existingCodeSession
           );
 
-          // Prepare response
+          // VCI v1.0: Prepare response with DPoP-aware token_type
           const tokenResponse = {
             access_token: generatedAccessToken,
             refresh_token: generateRefreshToken(),
-            token_type: "Bearer",
+            token_type: dpopCnf ? "DPoP" : "Bearer",
             expires_in: 86400,
-            // c_nonce: cNonceForSession,
-            // c_nonce_expires_in: 86400, removed in ID2
           };
           if (parsedAuthDetails) {
             try {
@@ -479,20 +518,18 @@ sharedRouter.post("/credential", async (req, res) => {
     // Depending on policy, you might allow this and skip specific alg validation or enforce credential_configuration_id for requests needing such validation.
   }
 
-  // Normalize key proof input according to ID2 (supports 'proof' or 'proofs')
-  // - If both are present, this is invalid
-  if (requestBody.proof && requestBody.proofs) {
+  // VCI v1.0 requires proofs (plural) only - reject proof (singular)
+  if (requestBody.proof) {
+    console.log("VCI v1.0: Rejecting 'proof' (singular), only 'proofs' (plural) is supported");
     await markSessionFailed(sessionObject, flowType, { codeSessionKey, preAuthsessionKey, token });
     return res.status(400).json({
-      error: "invalid_request",
-      error_description: "'proof' and 'proofs' MUST NOT be present at the same time",
+      error: "invalid_proof",
+      error_description: "VCI v1.0 requires 'proofs' (plural), not 'proof' (singular)",
     });
   }
 
   let proofJwt;
-  if (requestBody.proof && requestBody.proof.jwt) {
-    proofJwt = requestBody.proof.jwt;
-  } else if (requestBody.proofs) {
+  if (requestBody.proofs) {
     // proofs object must contain exactly one key named as the proof type (e.g., 'jwt')
     const proofTypeKeys = Object.keys(requestBody.proofs);
     if (proofTypeKeys.length !== 1) {
@@ -915,11 +952,10 @@ sharedRouter.post("/credential", async (req, res) => {
       await storePreAuthSession(preAuthsessionKey, sessionObject);
     }
 
-    // Update to use 202 status code for deferred issuance as specified in section 8.3
+    // VCI v1.0: Return 202 status with transaction_id and interval (polling interval in seconds)
     res.status(202).json({
       transaction_id: transaction_id,
-      c_nonce: generateNonce(),
-      c_nonce_expires_in: 86400,
+      interval: 5, // VCI v1.0: polling interval in seconds
     });
   } else {
     // Immediate issuance flow
@@ -997,15 +1033,26 @@ sharedRouter.post("/credential", async (req, res) => {
         format
       );
 
-      // Handle different response formats based on credential type
-      let response;
+      // VCI v1.0: Generate notification_id for credential lifecycle tracking
+      const notification_id = uuidv4();
+      
+      // Store notification_id in session for later validation
+      sessionObject.notification_id = notification_id;
+      sessionObject.status = "success";
+      if (flowType === "code") {
+        await storeCodeFlowSession(codeSessionKey, sessionObject);
+      } else {
+        await storePreAuthSession(preAuthsessionKey, sessionObject);
+      }
 
-      response = {
+      // VCI v1.0: Return credentials array with notification_id
+      const response = {
         credentials: [
           {
             credential,
           },
         ],
+        notification_id,
       };
 
       res.json(response);
@@ -1027,23 +1074,48 @@ sharedRouter.post("/credential_deferred", async (req, res) => {
   const authorizationHeader = req.headers["authorization"]; // Fetch the 'Authorization' header
 
   const transaction_id = req.body.transaction_id;
+  if (!transaction_id) {
+    return res.status(400).json({
+      error: "invalid_request",
+      error_description: "Missing transaction_id",
+    });
+  }
+
   const sessionId = await getDeferredSessionTransactionId(transaction_id);
   const sessionObject = await getCodeFlowSession(sessionId);
   if (!sessionObject) {
     return res.status(400).json({
       error: "invalid_transaction_id",
+      error_description: "Transaction ID not found or expired",
     });
-  } else {
-    /*
-    issuance_pending: The Credential issuance is still pending. The error response SHOULD also contain the interval member, determining the minimum amount of time in seconds that the Wallet needs to wait before providing a new request to the Deferred Credential Endpoint. If interval member is not present, the Wallet MUST use 5 as the default value.
-    */
+  }
+
+  // Check if credential is ready (for polling scenarios)
+  if (sessionObject.isCredentialReady === false) {
+    sessionObject.attempt = (sessionObject.attempt || 0) + 1;
+    // VCI v1.0: Return issuance_pending with interval for polling
+    return res.status(400).json({
+      error: "issuance_pending",
+      interval: 5, // VCI v1.0: minimum polling interval in seconds
+    });
+  }
+
+  try {
     const credential = await handleVcSdJwtFormatDeferred(
       sessionObject,
       serverURL
     );
+    
+    // VCI v1.0 Section 9.2: Deferred Credential Response uses 'credential' (singular)
+    // Format is specified in metadata, not in response
     return res.status(200).json({
-      format: "vc+sd-jwt",
-      credential, // Omit c_nonce here
+      credential,
+    });
+  } catch (err) {
+    console.error("Error generating deferred credential:", err);
+    return res.status(500).json({
+      error: "server_error",
+      error_description: err.message,
     });
   }
 });
@@ -1059,10 +1131,128 @@ sharedRouter.post("/nonce", async (req, res) => {
   // Store the nonce in Redis cache
   await storeNonce(newCNonce, nonceExpiresIn);
 
+  res.set("Cache-Control", "no-store");
   res.status(200).json({
     c_nonce: newCNonce,
     c_nonce_expires_in: nonceExpiresIn,
   });
+});
+
+// *****************************************************************
+// ************* NOTIFICATION ENDPOINT (VCI v1.0) ******************
+// *****************************************************************
+
+/**
+ * VCI v1.0 Notification Endpoint
+ * Handles credential lifecycle notifications from the wallet
+ * Events: credential_accepted, credential_failure, credential_deleted
+ */
+sharedRouter.post("/notification", async (req, res) => {
+  try {
+    const { notification_id, event, event_description } = req.body;
+
+    // Validate required parameters
+    if (!notification_id) {
+      return res.status(400).json({
+        error: "invalid_notification_request",
+        error_description: "Missing required parameter: notification_id",
+      });
+    }
+
+    if (!event) {
+      return res.status(400).json({
+        error: "invalid_notification_request",
+        error_description: "Missing required parameter: event",
+      });
+    }
+
+    // Validate Authorization header with Bearer token
+    const authHeader = req.headers["authorization"];
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      return res.status(401).json({
+        error: "invalid_token",
+        error_description: "Missing or invalid Authorization header. Expected: Bearer <access_token>",
+      });
+    }
+
+    const accessToken = authHeader.substring(7); // Remove "Bearer " prefix
+
+    // Find session associated with the access token
+    let sessionObject = null;
+    let sessionKey = null;
+    let flowType = "pre-auth";
+
+    // Try pre-auth sessions first
+    const preAuthsessionKey = await getSessionKeyFromAccessToken(accessToken);
+    if (preAuthsessionKey) {
+      sessionObject = await getPreAuthSession(preAuthsessionKey);
+      sessionKey = preAuthsessionKey;
+    }
+
+    // If not found, try code flow sessions
+    if (!sessionObject) {
+      const codeSessionKey = await getSessionAccessToken(accessToken);
+      if (codeSessionKey) {
+        sessionObject = await getCodeFlowSession(codeSessionKey);
+        sessionKey = codeSessionKey;
+        flowType = "code";
+      }
+    }
+
+    if (!sessionObject) {
+      return res.status(401).json({
+        error: "invalid_token",
+        error_description: "Invalid or expired access token",
+      });
+    }
+
+    // Verify notification_id matches the session
+    if (sessionObject.notification_id !== notification_id) {
+      console.log(`Notification ID mismatch: expected ${sessionObject.notification_id}, got ${notification_id}`);
+      // Still process - some implementations may not track notification_id strictly
+    }
+
+    // Log the notification event
+    console.log(`[NOTIFICATION] Received ${event} for session ${sessionKey}`, {
+      notification_id,
+      event,
+      event_description: event_description || null
+    });
+
+    // Handle different event types
+    if (event === "credential_failure" || event === "credential_deleted") {
+      sessionObject.status = "failed";
+      sessionObject.error = event;
+      sessionObject.error_description = event_description || `Credential ${event.replace('credential_', '')}`;
+      console.error(`Credential failure or deletion detected. Marking session as failed. Reason: ${event_description || event}`);
+      
+      if (flowType === "code") {
+        await storeCodeFlowSession(sessionKey, sessionObject);
+      } else {
+        await storePreAuthSession(sessionKey, sessionObject);
+      }
+    } else if (event === "credential_accepted") {
+      sessionObject.status = "success";
+      sessionObject.credentialAccepted = true;
+      console.log("Credential accepted event received. Marking session as successful.");
+      
+      if (flowType === "code") {
+        await storeCodeFlowSession(sessionKey, sessionObject);
+      } else {
+        await storePreAuthSession(sessionKey, sessionObject);
+      }
+    }
+
+    // Successfully processed notification - return 204 No Content
+    res.status(204).send();
+
+  } catch (error) {
+    console.error("Notification endpoint error:", error);
+    res.status(500).json({
+      error: "server_error",
+      error_description: error.message,
+    });
+  }
 });
 
 // *****************************************************************

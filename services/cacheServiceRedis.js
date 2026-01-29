@@ -372,3 +372,57 @@ export async function statusListTryAllocateIndex(id, index) {
     return false;
   }
 }
+
+// ---------------------------------------------
+// Poll time tracking for slow_down error handling (VCI v1.0)
+// Keys layout:
+//   poll-time:<sessionKey> -> timestamp of last poll
+// ---------------------------------------------
+
+/**
+ * Atomically check and set poll time for rate limiting.
+ * Returns false if polled too recently (within minPollIntervalSeconds).
+ * @param {string} sessionKey - Session identifier
+ * @param {number} minPollIntervalSeconds - Minimum seconds between polls
+ * @returns {Promise<boolean>} - true if polling is allowed, false if too recent
+ */
+export async function checkAndSetPollTime(sessionKey, minPollIntervalSeconds = 5) {
+  try {
+    const key = `poll-time:${sessionKey}`;
+    const now = Date.now();
+    const lastPollStr = await client.get(key);
+    
+    if (lastPollStr) {
+      const lastPoll = parseInt(lastPollStr, 10);
+      const elapsedSeconds = (now - lastPoll) / 1000;
+      
+      if (elapsedSeconds < minPollIntervalSeconds) {
+        console.log(`Poll rate limited for ${sessionKey}: ${elapsedSeconds.toFixed(1)}s < ${minPollIntervalSeconds}s`);
+        return false; // Too soon, slow down
+      }
+    }
+    
+    // Set new poll time with TTL of 60 seconds
+    await client.setEx(key, 60, String(now));
+    return true; // Polling allowed
+  } catch (err) {
+    console.error("Error checking/setting poll time:", err);
+    return true; // On error, allow polling to avoid blocking
+  }
+}
+
+/**
+ * Clear poll time tracking for a session (e.g., after successful issuance).
+ * @param {string} sessionKey - Session identifier
+ * @returns {Promise<boolean>}
+ */
+export async function clearPollTime(sessionKey) {
+  try {
+    const key = `poll-time:${sessionKey}`;
+    await client.del(key);
+    return true;
+  } catch (err) {
+    console.error("Error clearing poll time:", err);
+    return false;
+  }
+}

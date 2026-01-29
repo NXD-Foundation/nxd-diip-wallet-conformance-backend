@@ -4,7 +4,15 @@ import crypto from "crypto";
 import { error } from "console";
 import {generateNonce} from "../utils/cryptoUtils.js"
 
-export function buildAccessToken(issuerURL, privateKey) {
+/**
+ * Build an access token JWT
+ * @param {string} issuerURL - The issuer URL
+ * @param {string} privateKey - The private key for signing
+ * @param {Object} dpopCnf - Optional DPoP confirmation claim (VCI v1.0)
+ *                           If provided, the token will be DPoP-bound with cnf.jkt
+ * @returns {string} Signed JWT access token
+ */
+export function buildAccessToken(issuerURL, privateKey, dpopCnf = null) {
   const payload = {
     iss: issuerURL,
     sub: "user123", // This should be the authenticated user's identifier
@@ -13,10 +21,15 @@ export function buildAccessToken(issuerURL, privateKey) {
     iat: Math.floor(Date.now() / 1000), // Current time
     scope: "openid",
   };
+
+  // VCI v1.0: Add DPoP confirmation claim if provided (RFC 9449)
+  if (dpopCnf && dpopCnf.jkt) {
+    payload.cnf = { jkt: dpopCnf.jkt };
+  }
+
   // Sign the JWT
   const token = jwt.sign(payload, privateKey, { algorithm: "ES256" });
 
-  //   console.log(token);
   return token;
 }
 

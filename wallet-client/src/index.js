@@ -2,82 +2,18 @@
 import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
 import fetch from "node-fetch";
-import { createProofJwt, generateDidJwkFromPrivateJwk, ensureOrCreateEcKeyPair } from "./lib/crypto.js";
+import {
+  createProofJwt,
+  generateDidJwkFromPrivateJwk,
+  ensureOrCreateEcKeyPair,
+  createWIA,
+  createWUA,
+  createDPoP,
+} from "./lib/crypto.js";
 import { storeWalletCredentialByType } from "./lib/cache.js";
 import { resolveCredentialRequestParams } from "./lib/vci.js";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-async function discoverIssuerMetadata(credentialIssuerBase) {
-  const base = credentialIssuerBase.replace(/\/$/, "");
-  // RFC: if credential_issuer contains a path, well-known URI keeps path suffix
-  let origin, path;
-  try {
-    const u = new URL(base);
-    origin = u.origin;
-    path = u.pathname.replace(/\/$/, "");
-  } catch {
-    origin = base; path = "";
-  }
-  const candidates = [
-    `${origin}/.well-known/openid-credential-issuer${path}`,
-    `${base}/.well-known/openid-credential-issuer`,
-  ];
-  let meta = null; let lastErr = null;
-  for (const url of candidates) {
-    try {
-      const res = await fetch(url);
-      if (res.ok) { meta = await res.json(); break; }
-      lastErr = res.status;
-    } catch (e) { lastErr = e.message || String(e); }
-  }
-  if (!meta) throw new Error(`Issuer metadata fetch error ${lastErr}`);
-  // Normalize property names that can differ across specs/implementations
-  if (!meta.credential_deferred_endpoint && meta.deferred_credential_endpoint) {
-    meta.credential_deferred_endpoint = meta.deferred_credential_endpoint;
-  }
-  // Some issuers expose authorization_servers (array) instead of authorization_server
-  if (!meta.authorization_server && Array.isArray(meta.authorization_servers) && meta.authorization_servers.length > 0) {
-    meta.authorization_server = meta.authorization_servers[0];
-  }
-  return meta;
-}
-
-async function discoverAuthorizationServerMetadata(authorizationServerBase) {
-  // RFC 8414: If issuer has path component, well-known is host + '/.well-known/oauth-authorization-server' + path
-  const baseStr = authorizationServerBase.replace(/\/$/, "");
-  let origin, path;
-  try {
-    const u = new URL(baseStr);
-    origin = u.origin;
-    path = u.pathname.replace(/\/$/, "");
-  } catch {
-    // Not a full URL, fallback to direct
-    origin = baseStr;
-    path = "";
-  }
-
-  const candidates = [
-    `${origin}/.well-known/oauth-authorization-server${path}`,
-    `${origin}/.well-known/openid-configuration${path}`,
-    `${baseStr}/.well-known/oauth-authorization-server`,
-    `${baseStr}/.well-known/openid-configuration`,
-  ];
-
-  let lastErr = null;
-  for (const url of candidates) {
-    try {
-      const res = await fetch(url);
-      if (res.ok) { 
-        return res.json(); 
-      }
-      lastErr = res.status;
-    } catch (e) {
-      lastErr = e.message || String(e);
-    }
-  }
-  throw new Error(`AS metadata fetch error ${lastErr}`);
-}
 
 async function main() {
   const argv = yargs(hideBin(process.argv))
@@ -94,20 +30,37 @@ async function main() {
 
   const issuerBase = argv.issuer.replace(/\/$/, "");
 
-  const deepLink = argv.offer || (await getOfferDeepLink(issuerBase, argv["fetch-offer"], argv.credential));
+  const deepLink =
+    argv.offer || (await getOfferDeepLink(issuerBase, argv["fetch-offer"], argv.credential));
   if (!deepLink) {
     console.error("No offer provided or fetched.");
     process.exit(1);
   }
 
   const offerConfig = await resolveOfferConfig(deepLink);
-  const { credential_issuer, credential_configuration_ids, grants } = offerConfig;
+  const {
+    credential_issuer,
+    credential_configuration_ids: offerConfigIds,
+    credentials: legacyCredentialIds,
+    grants,
+  } = offerConfig;
 
-  const configurationId = argv.credential || credential_configuration_ids?.[0];
+  const normalizedConfigIds =
+    Array.isArray(offerConfigIds) && offerConfigIds.length > 0
+      ? offerConfigIds
+      : Array.isArray(legacyCredentialIds)
+      ? legacyCredentialIds
+      : legacyCredentialIds && typeof legacyCredentialIds === "object"
+      ? Object.keys(legacyCredentialIds)
+      : [];
+
+  const configurationId = argv.credential || normalizedConfigIds?.[0];
   if (!configurationId) {
     console.error("No credential_configuration_id available in offer; use --credential");
     process.exit(1);
   }
+
+  const apiBase = (credential_issuer || issuerBase).replace(/\/$/, "");
 
   const preAuthGrant = grants?.["urn:ietf:params:oauth:grant-type:pre-authorized_code"];
   if (!preAuthGrant) {
@@ -118,37 +71,66 @@ async function main() {
   const preAuthorizedCode = preAuthGrant["pre-authorized_code"]; // sessionId
   const txCode = preAuthGrant?.tx_code ? await promptTxCode(preAuthGrant.tx_code) : undefined;
 
-  // Fetch issuer metadata to get token endpoint
-  const apiBase = (credential_issuer || issuerBase).replace(/\/$/, "");
-  const issuerMeta = await discoverIssuerMetadata(apiBase);
-  let tokenEndpoint = issuerMeta.token_endpoint || null;
-  // If token_endpoint is not in issuer metadata, try authorization server metadata per RFC 8414
-  if (!tokenEndpoint && (issuerMeta.authorization_server || (Array.isArray(issuerMeta.authorization_servers) && issuerMeta.authorization_servers.length))) {
-    const asBase = issuerMeta.authorization_server || issuerMeta.authorization_servers[0];
-    try {
-      const asMeta = await discoverAuthorizationServerMetadata(asBase);
-      tokenEndpoint = asMeta.token_endpoint;
-    } catch (e) {
-      console.warn("AS metadata discovery failed:", e?.message || e);
-    }
+  const tokenEndpoint = `${apiBase}/token_endpoint`;
+  const authorizationDetails = configurationId
+    ? [
+        {
+          type: "openid_credential",
+          credential_configuration_id: configurationId,
+          ...(credential_issuer ? { locations: [credential_issuer] } : {}),
+        },
+      ]
+    : undefined;
+
+  // Generate DPoP (Demonstrating Proof-of-Possession) for token request
+  let dpopJwt = null;
+  try {
+    const { privateJwk: dpopPrivateJwk, publicJwk: dpopPublicJwk } =
+      await ensureOrCreateEcKeyPair(argv.key, "ES256");
+    dpopJwt = await createDPoP({
+      privateJwk: dpopPrivateJwk,
+      publicJwk: dpopPublicJwk,
+      htu: tokenEndpoint,
+      htm: "POST",
+      alg: "ES256",
+    });
+  } catch (dpopError) {
+    console.warn("Failed to generate DPoP:", dpopError?.message);
   }
-  // If still not found and no authorization_server specified, try issuer's own OAuth well-known endpoints
-  if (!tokenEndpoint && !issuerMeta.authorization_server && !(Array.isArray(issuerMeta.authorization_servers) && issuerMeta.authorization_servers.length)) {
-    try {
-      const asMeta = await discoverAuthorizationServerMetadata(apiBase);
-      tokenEndpoint = asMeta.token_endpoint;
-      console.log("tokenEndpoint discovered via issuer's OAuth metadata:", tokenEndpoint);
-    } catch (e) {
-      console.warn("Issuer OAuth metadata discovery failed:", e?.message || e);
-    }
+
+  // Generate WIA (Wallet Instance Attestation) for token request
+  let wiaJwt = null;
+  try {
+    const { privateJwk: wiaPrivateJwk, publicJwk: wiaPublicJwk } =
+      await ensureOrCreateEcKeyPair(argv.key, "ES256");
+    const wiaIssuer = generateDidJwkFromPrivateJwk(wiaPublicJwk);
+    wiaJwt = await createWIA({
+      privateJwk: wiaPrivateJwk,
+      publicJwk: wiaPublicJwk,
+      issuer: wiaIssuer,
+      audience: tokenEndpoint,
+      alg: "ES256",
+      ttlHours: 1,
+    });
+  } catch (wiaError) {
+    console.warn("Failed to generate WIA:", wiaError?.message);
   }
-  // Fallback to standard OAuth2 token endpoint
-  tokenEndpoint = tokenEndpoint || `${apiBase}/token`;
-  const tokenRes = await httpPostJson(tokenEndpoint, {
+
+  const tokenPayload = {
     grant_type: "urn:ietf:params:oauth:grant-type:pre-authorized_code",
     "pre-authorized_code": preAuthorizedCode,
     ...(txCode ? { tx_code: txCode } : {}),
-  });
+    ...(authorizationDetails && authorizationDetails.length
+      ? { authorization_details: JSON.stringify(authorizationDetails) }
+      : {}),
+    ...(wiaJwt
+      ? {
+          client_assertion: wiaJwt,
+          client_assertion_type: "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+        }
+      : {}),
+  };
+  const tokenRes = await httpPostJson(tokenEndpoint, tokenPayload, dpopJwt);
 
   if (!tokenRes.ok) {
     const err = await tokenRes.json().catch(() => ({}));
@@ -156,47 +138,85 @@ async function main() {
   }
   const tokenBody = await tokenRes.json();
   const accessToken = tokenBody.access_token;
-  const requestContext = resolveCredentialRequestParams({ configurationId, tokenResponse: tokenBody });
-
   let c_nonce = tokenBody.c_nonce;
+  let c_nonce_expires_in = tokenBody.c_nonce_expires_in;
+
   if (!c_nonce) {
-    const nonceEndpoint = issuerMeta.nonce_endpoint || `${apiBase}/nonce`;
+    const nonceEndpoint = `${apiBase}/nonce`;
     const nonceRes = await httpPostJson(nonceEndpoint, {});
     if (!nonceRes.ok) {
       const err = await nonceRes.json().catch(() => ({}));
       throw new Error(`Nonce error ${nonceRes.status}: ${JSON.stringify(err)}`);
     }
-    const noncePayload = await nonceRes.json();
-    c_nonce = noncePayload.c_nonce;
+    const nonceJson = await nonceRes.json();
+    c_nonce = nonceJson.c_nonce;
+    c_nonce_expires_in = nonceJson.c_nonce_expires_in;
   }
 
-  // key management
-  // Algorithm negotiation
-  const supportedAlgs = issuerMeta?.proof_types_supported?.jwt?.proof_signing_alg_values_supported || issuerMeta?.credential_configurations_supported?.[configurationId]?.proof_types_supported?.jwt?.proof_signing_alg_values_supported || [];
-  const preferredOrder = ["ES256", "ES384", "ES512", "EdDSA"];
-  const selectedAlg = (Array.isArray(supportedAlgs) && supportedAlgs.length)
-    ? (preferredOrder.find((a) => supportedAlgs.includes(a)) || supportedAlgs[0])
-    : "ES256";
+  if (!c_nonce) {
+    throw new Error("Issuer did not provide c_nonce; cannot complete proof-of-possession flow.");
+  }
 
-  const { privateJwk, publicJwk } = await ensureOrCreateEcKeyPair(argv.key, selectedAlg);
+  // Resolve credential request parameters (supports credential_identifier and configuration_id)
+  const requestContext = resolveCredentialRequestParams({
+    configurationId,
+    tokenResponse: tokenBody,
+  });
+
+  // key management
+  // In CLI mode we don't fetch issuerMeta; default to ES256 or allow override later if needed
+  const { privateJwk, publicJwk } = await ensureOrCreateEcKeyPair(argv.key, "ES256");
   const didJwk = generateDidJwkFromPrivateJwk(publicJwk);
 
-  // build proof JWT
-  const aud = issuerMeta?.credential_issuer || apiBase;
+  // credential request
+  const credentialEndpoint = `${apiBase}/credential`;
+
+  // Generate WUA (Wallet Unit Attestation) for credential request
+  let wuaJwt = null;
+  try {
+    const { privateJwk: wuaPrivateJwk, publicJwk: wuaPublicJwk } =
+      await ensureOrCreateEcKeyPair(argv.key, "ES256");
+    const wuaIssuer = generateDidJwkFromPrivateJwk(wuaPublicJwk);
+    wuaJwt = await createWUA({
+      privateJwk: wuaPrivateJwk,
+      publicJwk: wuaPublicJwk,
+      issuer: wuaIssuer,
+      audience: credentialEndpoint,
+      attestedKeys: [publicJwk], // Attest the key used for proof
+      eudiWalletInfo: {
+        general_info: {
+          name: "Test Wallet Client",
+          version: "1.0.0",
+        },
+        key_storage_info: {
+          storage_type: "software",
+          protection_level: "software",
+        },
+      },
+      alg: "ES256",
+      ttlHours: 24,
+    });
+  } catch (wuaError) {
+    console.warn("Failed to generate WUA:", wuaError?.message);
+  }
+
+  // build proof JWT with WUA in header as key_attestation (per spec)
   const proofJwt = await createProofJwt({
     privateJwk,
     publicJwk,
-    audience: aud,
+    audience: credential_issuer || issuerBase,
     nonce: c_nonce,
+    issuer: didJwk,
     typ: "openid4vci-proof+jwt",
-    alg: selectedAlg,
+    alg: "ES256",
+    key_attestation: wuaJwt || undefined,
   });
 
-  // credential request - use endpoint from issuer metadata
-  const credentialEndpoint = issuerMeta.credential_endpoint || `${apiBase}/credential`;
   const credReq = {
     ...requestContext.requestPayload,
-    proof: { proof_type: "jwt", jwt: proofJwt },
+    proofs: {
+      jwt: [proofJwt],
+    },
   };
 
   const credRes = await fetch(credentialEndpoint, {
@@ -212,17 +232,22 @@ async function main() {
     //deferred issuance
     const { transaction_id } = await credRes.json();
     const start = Date.now();
-    const deferredEndpoint = issuerMeta.credential_deferred_endpoint || `${apiBase}/credential_deferred`;
     while (Date.now() - start < argv["poll-timeout"]) {
       await sleep(argv["poll-interval"]);
-      const defRes = await httpPostJson(deferredEndpoint, { transaction_id });
+      const defRes = await httpPostJson(`${apiBase}/credential_deferred`, { transaction_id });
       if (defRes.ok) {
         const body = await defRes.json();
-        // store credential and key-binding material using preAuthorizedCode as session key
+        // store credential and key-binding material using storageKey from requestContext
         await storeWalletCredentialByType(requestContext.storageKey, {
           credential: body,
           keyBinding: { privateJwk, publicJwk, didJwk },
-          metadata: { configurationId, credentialIdentifier: requestContext.credentialIdentifier, c_nonce },
+          metadata: {
+            configurationId,
+            credentialIdentifier: requestContext.credentialIdentifier,
+            c_nonce,
+            c_nonce_expires_in,
+            credential_issuer: credential_issuer || apiBase,
+          },
         });
         console.log(JSON.stringify(body, null, 2));
         return;
@@ -237,11 +262,17 @@ async function main() {
   }
 
   const credBody = await credRes.json();
-  // store credential and key-binding material using preAuthorizedCode as session key
+  // store credential and key-binding material using storageKey from requestContext
   await storeWalletCredentialByType(requestContext.storageKey, {
     credential: credBody,
     keyBinding: { privateJwk, publicJwk, didJwk },
-    metadata: { configurationId, credentialIdentifier: requestContext.credentialIdentifier, c_nonce },
+    metadata: {
+      configurationId,
+      credentialIdentifier: requestContext.credentialIdentifier,
+      c_nonce,
+      c_nonce_expires_in,
+      credential_issuer: credential_issuer || apiBase,
+    },
   });
   console.log(JSON.stringify(credBody, null, 2));
 }
@@ -260,9 +291,17 @@ async function getOfferDeepLink(issuerBase, path, credentialType) {
 }
 
 async function resolveOfferConfig(deepLink) {
-  const url = new URL(deepLink.replace(/^haip:\/\//, "openid-credential-offer://"));
+  // Normalize HAIP profile schemes (haip://, haip-vci://) to the standard
+  // openid-credential-offer:// scheme.
+  const url = new URL(
+    deepLink.replace(/^haip(-vci)?:\/\//, "openid-credential-offer://")
+  );
   if (url.protocol !== "openid-credential-offer:") {
     throw new Error("Unsupported offer scheme");
+  }
+  const inlineOffer = url.searchParams.get("credential_offer");
+  if (inlineOffer) {
+    return parseCredentialOfferParam(inlineOffer);
   }
   const encoded = url.searchParams.get("credential_offer_uri");
   if (!encoded) throw new Error("Missing credential_offer_uri in offer");
@@ -275,6 +314,30 @@ async function resolveOfferConfig(deepLink) {
   return res.json();
 }
 
+function parseCredentialOfferParam(value) {
+  const attempts = new Set([value]);
+  try {
+    attempts.add(decodeURIComponent(value));
+  } catch {
+    // ignore decode errors
+  }
+
+  for (const attempt of attempts) {
+    try {
+      return JSON.parse(attempt);
+    } catch {
+      // not plain JSON, try base64url
+      try {
+        const decoded = Buffer.from(attempt, "base64url").toString("utf8");
+        return JSON.parse(decoded);
+      } catch {
+        // continue trying other attempts
+      }
+    }
+  }
+  throw new Error("Unable to parse credential_offer parameter");
+}
+
 async function promptTxCode(cfg) {
   // Non-interactive default: generate a dummy numeric code if required; issuer currently does not validate tx_code server-side.
   if (cfg?.input_mode === "numeric" && typeof cfg?.length === "number") {
@@ -283,10 +346,14 @@ async function promptTxCode(cfg) {
   return undefined;
 }
 
-async function httpPostJson(url, body) {
+async function httpPostJson(url, body, dpopHeader = null) {
+  const headers = { "content-type": "application/json" };
+  if (dpopHeader) {
+    headers["DPoP"] = dpopHeader;
+  }
   return fetch(url, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers,
     body: JSON.stringify(body || {}),
   });
 }

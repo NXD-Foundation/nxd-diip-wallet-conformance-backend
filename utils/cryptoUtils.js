@@ -70,6 +70,7 @@ export function buildVpRequestJSON(
  * 
  */
 
+  // VP v1.0: Use vp_formats_supported instead of vp_formats
   let jwtPayload = {
     response_type: "vp_token",
     client_id: client_id,
@@ -80,8 +81,12 @@ export function buildVpRequestJSON(
     nonce: "n-0S6_WzA2Mj",
     state: "af0ifjsldkj",
     client_metadata: {
-      vp_formats: {
+      vp_formats_supported: {
         "vc+sd-jwt": {
+          "sd-jwt_alg_values": ["ES256", "ES384"],
+          "kb-jwt_alg_values": ["ES256", "ES384"],
+        },
+        "dc+sd-jwt": {
           "sd-jwt_alg_values": ["ES256", "ES384"],
           "kb-jwt_alg_values": ["ES256", "ES384"],
         },

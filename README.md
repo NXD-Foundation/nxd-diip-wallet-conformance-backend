@@ -1,53 +1,64 @@
-# DIIP v4 - Issuer / Verifier / Wallet Service
+# DIIP v5 (based on DIIP v4) - Issuer / Verifier / Wallet Service
 
-A comprehensive Node.js implementation aligned with the **[Decentralized Identity Interop Profile v4 (DIIP v4)](https://fidescommunity.github.io/DIIP/)** specification, implementing **OpenID for Verifiable Credential Issuance (OID4VCI) Draft 15** and **OpenID for Verifiable Presentations (OID4VP) Draft 28**, with additional support for **HAIP (High Assurance Identity Profile)** and **EUDI Wallet ARF (Architecture and Reference Framework)** specifications.
+A comprehensive Node.js implementation aligned with the **[Decentralized Identity Interop Profile v4 (DIIP v4)](https://fidescommunity.github.io/DIIP/)** specification, **upgraded to use the final OpenID for Verifiable Credential Issuance (OID4VCI) v1.0 and OpenID for Verifiable Presentations (OpenID4VP) v1.0 specifications**.  
+This codebase now serves as the **reference implementation for DIIP v5**, while retaining full DIIP v4 profile coverage and extending it with VCI/VP v1.0, **HAIP (High Assurance Identity Profile)**, and **EUDI Wallet ARF (Architecture and Reference Framework)** features.
 
 ## Overview
 
-This project provides a unified backend service implementing three roles, **aligned with the DIIP v4 profile**:
+This project provides a unified backend service implementing three roles, **aligned with the DIIP v4 profile and extended as the DIIP v5 reference implementation**:
 
-- **Credential Issuer**: DIIP v4-compliant OID4VCI Draft 15 implementation supporting SD-JWT VC credentials (with additional support for JWT VC and mDL/PID)
-- **Credential Verifier**: DIIP v4-compliant OpenID4VP Draft 28 implementation supporting `did` client identification scheme and DCQL/PEX query formats
-- **Wallet Holder**: Companion wallet-holder implementation for exercising all issuer and verifier capabilities
+- **Credential Issuer**: DIIP v4-compliant **OID4VCI v1.0** implementation supporting SD-JWT VC and JSON-LD credentials (`dc+sd-jwt`, `vc+sd-jwt`, `jwt_vc_json`, `mso_mdoc`)
+- **Credential Verifier**: DIIP v4-compliant **OpenID4VP v1.0** implementation supporting `decentralized_identifier` client identification schemes (`did:web`, `did:jwk`) and DCQL/PEX query formats
+- **Wallet Holder**: Companion wallet-holder implementation (CLI + HTTP service) updated to **VCI v1.0 and VP v1.0**, including DPoP and Wallet Attestations (WIA/WUA)
 
 The service is **configuration-driven**, allowing new credential types and verifier scenarios to be added primarily through JSON configuration files rather than code changes.
 
-**DIIP v4 Compliance**: This implementation follows the [Decentralized Identity Interop Profile v4 (DIIP v4)](https://fidescommunity.github.io/DIIP/) specification, which defines a minimal set of requirements for interoperable credential issuance and presentation. All DIIP v4 required features are implemented, with additional optional features available for extended use cases.
+**DIIP v4 / v5 Compliance**: This implementation follows the [Decentralized Identity Interop Profile v4 (DIIP v4)](https://fidescommunity.github.io/DIIP/) specification and **extends it as DIIP v5**, which:
+
+- Migrates from **OID4VCI Draft 15 → OID4VCI v1.0**
+- Migrates from **OpenID4VP Draft 28 → OpenID4VP v1.0**
+- Keeps and extends SD-JWT and JSON-LD credential support
+- Introduces first-class support for Wallet Attestations (WIA/WUA) and DPoP
 
 ## Standards Compliance
 
-This implementation is **aligned with DIIP v4** and conforms to the following specifications:
+This implementation is **aligned with DIIP v4** and **upgraded as the DIIP v5 reference implementation**. It conforms to:
 
-### DIIP v4 Profile Compliance
+### DIIP v4 / v5 Profile Compliance
 
 This implementation follows the **[Decentralized Identity Interop Profile v4 (DIIP v4)](https://fidescommunity.github.io/DIIP/)** which specifies:
 
 - **Credential Format**: SD-JWT VC (draft 08) and W3C VCDM 2.0
 - **Signature Algorithm**: ES256 (RFC 7518) - **REQUIRED by DIIP v4**
 - **Identifiers**: `did:jwk` and `did:web` - **REQUIRED by DIIP v4**
-- **Issuance Protocol**: OID4VCI Draft 15
-- **Presentation Protocol**: OID4VP Draft 28
+- **Issuance Protocol**:
+  - **DIIP v4 baseline**: OID4VCI Draft 15
+  - **DIIP v5 upgrade**: **OID4VCI v1.0** (this implementation)
+- **Presentation Protocol**:
+  - **DIIP v4 baseline**: OpenID4VP Draft 28
+  - **DIIP v5 upgrade**: **OpenID4VP v1.0** (this implementation)
 - **Revocation**: IETF Token Status List (Draft 10) - **REQUIRED by DIIP v4**
 - **OID4VP Client Identifier Scheme**: `did` scheme - **REQUIRED by DIIP v4**
 - **OID4VP Request URI Method**: `get` method - **REQUIRED by DIIP v4**
 
 ### Core Standards
 
-- **[OID4VCI Draft 15](https://openid.net/specs/openid-4-verifiable-credential-issuance-1_0.html)** - OpenID for Verifiable Credential Issuance
-  - Pre-authorized code flow (Section 4.1.1)
-  - Authorization code flow (Section 4.1.2)
-  - Proof-of-Possession (Section 7.2)
-  - Deferred issuance (Section 9.2)
-  - Notification endpoint (Section 11)
-  - Nonce endpoint (Section 8.1)
+- **[OID4VCI v1.0](https://openid.net/specs/openid-4-verifiable-credential-issuance-1_0.html)** - OpenID for Verifiable Credential Issuance (current implementation)
+  - Pre-authorized code flow and authorization code flow
+  - **`proofs` (plural) key proof object only** (legacy `proof` is rejected)
+  - Dedicated `/nonce` endpoint for key proof nonces
+  - `/credential` returns **`credentials` array** with optional `notification_id`
+  - Deferred issuance via `/credential_deferred` with `issuance_pending` and `interval`
+  - `/notification` endpoint for credential lifecycle events
+  - DPoP-bound access tokens support
 
-- **[OpenID4VP Draft 28](https://openid.net/specs/openid-4-verifiable-presentations-1_0.html)** - OpenID for Verifiable Presentations
+- **[OpenID4VP v1.0](https://openid.net/specs/openid-4-verifiable-presentations-1_0.html)** - OpenID for Verifiable Presentations (current implementation)
   - JWT Authorization Request (JAR) per RFC 9101
   - Presentation Exchange (PEX) v2.0.0
   - Digital Credentials Query Language (DCQL)
-  - Multiple client identification schemes (including `did` scheme required by DIIP v4)
-  - Multiple response modes
-  - Request URI method `get` support (required by DIIP v4)
+  - `decentralized_identifier` client identification scheme (`did:web`, `did:jwk`)
+  - `vp_formats_supported` metadata
+  - Request URI method `get` and `post` (via `request_uri_method` parameter)
 
 ### Profile Extensions
 
