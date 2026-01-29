@@ -2,11 +2,11 @@
   "name": "rfc-issuer-v1",
   "version": "1.0.0",
   "description": "",
-  "main": "server.js",
+  "main": "rfc-issuer-v1/server.js",
   "type": "module",
   "scripts": {
-    "test": "mocha tests/**/*.js",
-    "dev": "SERVER_URL=https://45ac74aa1399.ngrok-free.app  node server.js"
+    "test": "cd rfc-issuer-v1 && npm test",
+    "dev": "cd rfc-issuer-v1 && npm run dev"
   },
   "author": "",
   "license": "ISC",
