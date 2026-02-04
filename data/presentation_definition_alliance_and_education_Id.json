@@ -1,0 +1,101 @@
+{
+  "id": "d49ee616-0e8d-4698-aff5-2a8a2362652d",
+  "name": "Multi-Credential Request",
+  "format": {
+    "vc+sd-jwt": {
+      "alg": ["ES256", "ES384"]
+    }
+  },
+  "input_descriptors": [
+    {
+      "id": "ewc-pid-credential",
+      "name": "DIIPv5 PID Credential",
+      "format": {
+        "vc+sd-jwt": {
+          "alg": ["ES256", "ES384"]
+        }
+      },
+      "constraints": {
+        "fields": [
+          {
+            "path": ["$.given_name"]
+          },
+          {
+            "path": ["$.family_name"]
+          },
+          {
+            "path": ["$.birth_date"]
+          },
+          {
+            "path": ["$.age_over_18"]
+          },
+          {
+            "path": ["$.issuance_date"]
+          },
+          {
+            "path": ["$.expiry_date"]
+          },
+          {
+            "path": ["$.issuing_authority"]
+          },
+          {
+            "path": ["$.issuing_country"]
+          },
+          {
+            "path": ["$.vct"],
+            "filter": {
+              "type": "string",
+              "const": "urn:eu.europa.ec.eudi:pid:1"
+            }
+          }
+        ],
+        "limit_disclosure": "required"
+      }
+    },
+    {
+      "id": "educational-id-credential",
+      "name": "Student ID Credential",
+      "format": {
+        "vc+sd-jwt": {
+          "alg": ["ES256", "ES384"]
+        }
+      },
+      "constraints": {
+        "fields": [
+          {
+            "path": ["$.schacPersonalUniqueID"]
+          },
+          {
+            "path": ["$.schacHomeOrganization"]
+          },
+          {
+            "path": ["$.familyName"]
+          },
+          {
+            "path": ["$.firstName"]
+          },
+          {
+            "path": ["$.dateOfBirth"]
+          },
+          {
+            "path": ["$.eduPersonPrincipalName"]
+          },
+          {
+            "path": ["$.eduPersonPrimaryAffiliation"]
+          },
+          {
+            "path": ["$.eduPersonAffiliation"]
+          },
+          {
+            "path": ["$.vct"],
+            "filter": {
+              "type": "string",
+              "const": "VerifiableStudentIDSDJWT"
+            }
+          }
+        ],
+        "limit_disclosure": "required"
+      }
+    }
+  ]
+}

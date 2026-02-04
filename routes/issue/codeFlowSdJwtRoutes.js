@@ -1,0 +1,982 @@
+import express, { urlencoded } from "express";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+import { v4 as uuidv4 } from "uuid";
+import {
+  getPushedAuthorizationRequests,
+  getSessionsAuthorizationDetail,
+  getAuthCodeAuthorizationDetail,
+} from "../../services/cacheService.js";
+import { buildVPbyValue } from "../../utils/tokenUtils.js";
+
+import qr from "qr-image";
+import imageDataURI from "image-data-uri";
+import { streamToBuffer } from "@jorgeferrero/stream-to-buffer";
+import { generateNonce, buildVpRequestJWT } from "../../utils/cryptoUtils.js";
+import {
+  updateIssuerStateWithAuthCode,
+  updateIssuerStateWithAuthCodeAfterVP,
+} from "../codeFlowJwtRoutes.js";
+
+import { getCodeFlowSession, storeCodeFlowSession, logInfo, logWarn, logError } from "../../services/cacheServiceRedis.js";
+import { makeSessionLogger, logHttpRequest, logHttpResponse } from "../../utils/sessionLogger.js";
+
+// Specification references
+const SPEC_REFS = {
+  VCI_1_0: "https://openid.net/specs/openid-4-verifiable-credential-issuance-1_0.html",
+  VCI_AUTHORIZATION: "https://openid.net/specs/openid-4-verifiable-credential-issuance-1_0.html#name-authorization-endpoint",
+};
+
+import {
+  // Shared constants
+  SERVER_URL,
+  PROXY_PATH,
+  DEFAULT_CREDENTIAL_TYPE,
+  DEFAULT_SIGNATURE_TYPE,
+  DEFAULT_CLIENT_ID_SCHEME,
+  DEFAULT_REDIRECT_URI,
+  QR_CONFIG,
+  CLIENT_METADATA,
+  URL_SCHEMES,
+  ERROR_MESSAGES,
+  
+  // Cryptographic utilities
+  loadPresentationDefinition,
+  loadPrivateKey,
+  
+  // Parameter extraction utilities
+  getSessionId,
+  getCredentialType,
+  getSignatureType,
+  getClientIdScheme,
+  
+  // Session management utilities
+  createCodeFlowSession,
+  
+  // QR code and URL generation utilities
+  generateQRCode,
+  createCodeFlowCredentialOfferResponse,
+  createCredentialOfferConfig,
+  
+  // DID utilities
+  buildDidController,
+  
+  // Error handling utilities
+  handleRouteError,
+  sendErrorResponse,
+  bindSessionLoggingContext,
+  
+  // WIA/WUA validation utilities
+  validateWIA,
+  extractWIAFromTokenRequest,
+} from "../../utils/routeUtils.js";
+
+const codeFlowRouterSDJWT = express.Router();
+
+// Load private key
+const PRIVATE_KEY = fs.readFileSync("./private-key.pem", "utf-8");
+
+// Helper Functions
+async function manageSession(uuid, sessionData) {
+  const existingSession = await getCodeFlowSession(uuid);
+  if (!existingSession) {
+    await storeCodeFlowSession(uuid, sessionData);
+  }
+  return existingSession;
+}
+
+function createPARRequest(requestData) {
+  const requestURI = "urn:aegean.gr:" + uuidv4();
+  const parRequests = getPushedAuthorizationRequests();
+  
+  parRequests.set(requestURI, {
+    client_id: requestData.client_id,
+    scope: requestData.scope,
+    response_type: requestData.response_type,
+    redirect_uri: requestData.redirect_uri,
+    code_challenge: requestData.code_challenge,
+    code_challenge_method: requestData.code_challenge_method,
+    claims: requestData.claims,
+    state: requestData.state,
+    authorizationHeader: requestData.authorizationHeader,
+    responseType: requestData.response_type,
+    issuerState: requestData.issuerState,
+    authorizationDetails: requestData.authorizationDetails,
+    clientMetadata: requestData.clientMetadata,
+    wallet_issuer_id: requestData.wallet_issuer_id,
+    user_hint: requestData.user_hint,
+  });
+
+  return {
+    request_uri: requestURI,
+    expires_in: 90,
+  };
+}
+
+function parseAuthorizationDetails(authorizationDetails) {
+  if (!authorizationDetails) return null;
+  
+  try {
+    return JSON.parse(decodeURIComponent(authorizationDetails));
+  } catch (error) {
+    const received = typeof authorizationDetails === 'string' ? `string (${authorizationDetails.substring(0, 100)}...)` : typeof authorizationDetails;
+    console.log(`Error parsing authorization details. Received: ${received}, expected: valid JSON string, error: ${error.message}`);
+    throw new Error(`${ERROR_MESSAGES.PARSE_AUTHORIZATION_DETAILS_ERROR}. Received: ${received}, expected: valid JSON string`);
+  }
+}
+
+function extractCredentialsFromAuthorizationDetails(authorizationDetails) {
+  const credentials = [];
+  let isPIDIssuanceFlow = false;
+
+  if (authorizationDetails && authorizationDetails.length > 0) {
+    authorizationDetails.forEach((item) => {
+      const cred = fetchVCTorCredentialConfigId(item);
+      credentials.push(cred);
+      
+      if (cred === "urn:eu.europa.ec.eudi:pid:1" || cred.indexOf("urn:eu.europa.ec.eudi:pid:1") >= 0) {
+        isPIDIssuanceFlow = true;
+      }
+      
+      console.log("requested credentials: " + cred);
+    });
+  }
+
+  return { credentials, isPIDIssuanceFlow };
+}
+
+function extractCredentialsFromScope(scope) {
+  const credentials = [];
+  let isPIDIssuanceFlow = false;
+
+  if (scope) {
+    console.log("requested credentials: " + scope);
+    credentials.push(scope);
+    if (scope.indexOf("urn:eu.europa.ec.eudi:pid:1") >= 0) {
+      isPIDIssuanceFlow = true;
+    }
+  }
+
+  return { credentials, isPIDIssuanceFlow };
+}
+
+function validateAuthorizationRequest(response_type, code_challenge, authorizationDetails) {
+  const errors = [];
+
+  if (authorizationDetails) {
+    if (!response_type) {
+      errors.push(`${ERROR_MESSAGES.MISSING_RESPONSE_TYPE}. Received: ${response_type === undefined ? 'undefined' : response_type}, expected: 'code'. See ${SPEC_REFS.VCI_AUTHORIZATION}`);
+    }
+    if (!code_challenge) {
+      errors.push(`${ERROR_MESSAGES.MISSING_CODE_CHALLENGE}. Received: ${code_challenge === undefined ? 'undefined' : code_challenge}, expected: code_challenge string. See ${SPEC_REFS.VCI_AUTHORIZATION}`);
+    }
+  }
+
+  if (response_type !== "code") {
+    errors.push(`${ERROR_MESSAGES.INVALID_RESPONSE_TYPE}. Received: '${response_type}', expected: 'code'. See ${SPEC_REFS.VCI_AUTHORIZATION}`);
+  }
+
+  return errors;
+}
+
+function handlePARRequest(request_uri) {
+  if (!request_uri) return null;
+
+  const parRequest = getPushedAuthorizationRequests()?.get(request_uri);
+  if (!parRequest) {
+    console.log(`${ERROR_MESSAGES.PAR_REQUEST_NOT_FOUND}. Received: request_uri '${request_uri}' not found in cache, expected: valid request_uri from PAR endpoint`);
+    return null;
+  }
+
+  return parRequest;
+}
+
+function updateSessionForAuthorization(existingCodeSession, requestData) {
+  existingCodeSession.walletSession = requestData.state;
+  existingCodeSession.authorizationDetails = requestData.authorizationDetails;
+  existingCodeSession.scope = requestData.scope;
+  existingCodeSession.requests = {
+    redirectUri: requestData.redirectUri,
+    challenge: requestData.code_challenge,
+    method: requestData.code_challenge_method,
+    sessionId: null,
+    issuerState: requestData.issuerState,
+    state: requestData.state,
+  };
+  existingCodeSession.results = {
+    sessionId: null,
+    issuerState: requestData.issuerState,
+    state: requestData.state,
+    status: "pending",
+  };
+  existingCodeSession.status = "pending";
+  existingCodeSession.isPIDIssuanceFlow = requestData.isPIDIssuanceFlow;
+  existingCodeSession.flowType = "code";
+
+  return existingCodeSession;
+}
+
+function handleDynamicAuthorizationRedirect(existingCodeSession, requestData) {
+  const { client_id_scheme, credentialsRequested, nonce, state, redirectUri } = requestData;
+
+  if (client_id_scheme === "redirect_uri") {
+    return handleRedirectUriScheme(existingCodeSession, requestData);
+  } else if (client_id_scheme === "x509_san_dns") {
+    return handleX509Scheme(existingCodeSession, requestData);
+  } else if (client_id_scheme.indexOf("did") >= 0) {
+    return handleDidScheme(existingCodeSession, requestData);
+  } else if (client_id_scheme === "payment") {
+    return handlePaymentScheme(existingCodeSession, requestData);
+  }
+
+  const supportedSchemes = ["redirect_uri", "x509_san_dns", "did:web", "did:jwk", "payment"];
+  throw new Error(`Unsupported client_id_scheme. Received: '${client_id_scheme}', expected: one of [${supportedSchemes.join(', ')}]`);
+}
+
+function handleRedirectUriScheme(existingCodeSession, requestData) {
+  const { credentialsRequested, nonce, issuerState } = requestData;
+  
+  console.log("client_id_scheme redirect_uri");
+  const response_uri = `${SERVER_URL}/direct_post_vci/${issuerState}`;
+  const presentation_definition_uri = `${SERVER_URL}/presentation-definition/itbsdjwt`;
+  const client_metadata_uri = `${SERVER_URL}/client-metadata`;
+
+  let redirectUrl = buildVPbyValue(
+    response_uri,
+    presentation_definition_uri,
+    "redirect_uri",
+    client_metadata_uri,
+    response_uri,
+    "vp_token",
+    nonce
+  );
+
+  if (credentialsRequested.indexOf("urn:eu.europa.ec.eudi:pid:1") >= 0) {
+    console.log("passing id_token!!");
+    redirectUrl = buildVPbyValue(
+      response_uri,
+      null,
+      "redirect_uri",
+      client_metadata_uri,
+      response_uri,
+      existingCodeSession.state,
+      "id_token",
+      nonce
+    );
+  }
+
+  return redirectUrl;
+}
+
+function handleX509Scheme(existingCodeSession, requestData) {
+  const { credentialsRequested, redirectUri, issuerState } = requestData;
+  
+  console.log("client_id_scheme x509_san_dns");
+  
+  if (credentialsRequested.indexOf("urn:eu.europa.ec.eudi:pid:1") >= 0) {
+    return handleX509PIDFlow(existingCodeSession, requestData);
+  }
+
+  const request_uri = `${SERVER_URL}/x509VPrequest_dynamic/${issuerState}`;
+  // Extract hostname from SERVER_URL for x509_san_dns client_id
+  const clientId = new URL(SERVER_URL).hostname;
+  const vpRequest = `openid4vp://?client_id=${encodeURIComponent(clientId)}&request_uri=${encodeURIComponent(request_uri)}&request_uri_method=get`;
+
+  return vpRequest;
+}
+
+async function handleX509PIDFlow(existingCodeSession, requestData) {
+  const { authorizationDetails, redirectUri, issuerState } = requestData;
+  
+  const authorizationCode = generateNonce(16);
+  getAuthCodeAuthorizationDetail().set(authorizationCode, authorizationDetails);
+  
+  existingCodeSession.results.sessionId = authorizationCode;
+  existingCodeSession.requests.sessionId = authorizationCode;
+  await storeCodeFlowSession(issuerState, existingCodeSession);
+
+  return `${redirectUri}?code=${authorizationCode}&state=${existingCodeSession.requests.state}`;
+}
+
+function handleDidScheme(existingCodeSession, requestData) {
+  const { credentialsRequested, issuerState } = requestData;
+  
+  console.log("client_id_scheme did");
+  
+  let request_uri = `${SERVER_URL}/didJwksVPrequest_dynamic/${issuerState}`;
+  if (credentialsRequested.indexOf("urn:eu.europa.ec.eudi:pid:1") >= 0) {
+    request_uri = `${SERVER_URL}/id_token_did_request_dynamic/${issuerState}`;
+  }
+
+  const controller = buildDidController();
+  const clientId = `did:web:${controller}`;
+  const vpRequest = `openid4vp://?client_id=${encodeURIComponent(clientId)}&request_uri=${encodeURIComponent(request_uri)}&request_uri_method=get`;
+
+  return vpRequest;
+}
+
+function handlePaymentScheme(existingCodeSession, requestData) {
+  const { issuerState } = requestData;
+  
+  console.log("client_id_scheme payment");
+  const request_uri = `${SERVER_URL}/payment-request/${issuerState}`;
+  // Extract hostname from SERVER_URL for x509_san_dns client_id
+  const clientId = new URL(SERVER_URL).hostname;
+  const vpRequest = `openid4vp://?client_id=${encodeURIComponent(clientId)}&request_uri=${encodeURIComponent(request_uri)}&request_uri_method=get`;
+
+  return vpRequest;
+}
+
+async function handleNonDynamicAuthorization(existingCodeSession, requestData) {
+  const { state, authorizationDetails, issuerState } = requestData;
+  
+  const authorizationCode = generateNonce(16);
+  const issuanceState = issuerState;
+  
+  existingCodeSession.results.sessionId = authorizationCode;
+  existingCodeSession.requests.sessionId = authorizationCode;
+  existingCodeSession.results.state = state;
+  existingCodeSession.authorizationCode = authorizationCode;
+  existingCodeSession.authorizationDetails = authorizationDetails;
+  
+  await storeCodeFlowSession(issuanceState, existingCodeSession);
+
+  const encodedIssuer = encodeURIComponent(SERVER_URL);
+  return `${existingCodeSession.requests.redirectUri}?code=${authorizationCode}&state=${state}&iss=${encodedIssuer}`;
+}
+
+async function buildVPRequestJWTForX509(uuid) {
+  const response_uri = `${SERVER_URL}/direct_post_vci/${uuid}`;
+  const presentation_definition_sdJwt = loadPresentationDefinition();
+  // Extract hostname from SERVER_URL for x509_san_dns client_id
+  const clientId = new URL(SERVER_URL).hostname;
+  
+  return await buildVpRequestJWT(
+    clientId,
+    response_uri,
+    presentation_definition_sdJwt,
+    "",
+    "x509_san_dns",
+    CLIENT_METADATA,
+    null,
+    SERVER_URL
+  );
+}
+
+async function buildVPRequestJWTForDid(uuid) {
+  const response_uri = `${SERVER_URL}/direct_post_vci/${uuid}`;
+  const privateKeyPem = loadPrivateKey();
+  const controller = buildDidController();
+  const clientId = `did:web:${controller}`;
+  const presentation_definition_sdJwt = loadPresentationDefinition();
+
+  return await buildVpRequestJWT(
+    clientId,
+    response_uri,
+    presentation_definition_sdJwt,
+    privateKeyPem,
+    "did",
+    CLIENT_METADATA,
+    `did:web:${controller}#keys-1`,
+    SERVER_URL
+  );
+}
+
+async function buildIdTokenRequestJWTForX509(uuid, existingCodeSession) {
+  const response_uri = `${SERVER_URL}/direct_post_vci/${existingCodeSession.requests.state}`;
+  // Extract hostname from SERVER_URL for x509_san_dns client_id
+  const clientId = new URL(SERVER_URL).hostname;
+  
+  return await buildVpRequestJWT(
+    clientId,
+    response_uri,
+    null,
+    "",
+    "x509_san_dns",
+    CLIENT_METADATA,
+    null,
+    SERVER_URL,
+    "id_token"
+  );
+}
+
+async function buildIdTokenRequestJWTForDid(uuid, existingCodeSession) {
+  const response_uri = `${SERVER_URL}/direct_post_vci/${existingCodeSession.requests.state}`;
+  const privateKeyPem = loadPrivateKey();
+  const controller = buildDidController();
+  const clientId = `did:web:${controller}`;
+  const presentation_definition_sdJwt = loadPresentationDefinition();
+
+  return await buildVpRequestJWT(
+    clientId,
+    response_uri,
+    null,
+    privateKeyPem,
+    "did",
+    CLIENT_METADATA,
+    `did:web:${controller}#keys-1`,
+    SERVER_URL,
+    "vp_token id_token"
+  );
+}
+
+// ******************************************************************
+// ************* CREDENTIAL OFFER ENDPOINTS *************************
+// ******************************************************************
+codeFlowRouterSDJWT.get(["/offer-code-sd-jwt"], async (req, res) => {
+  let sessionId;
+  try {
+    sessionId = getSessionId(req);
+    bindSessionLoggingContext(req, res, sessionId);
+
+    const signatureType = getSignatureType(req);
+    const credentialType = getCredentialType(req);
+    const client_id_scheme = getClientIdScheme(req);
+
+    const sessionData = createCodeFlowSession(client_id_scheme, "code", false, false, signatureType);
+    await manageSession(sessionId, sessionData);
+
+    // Allow caller to control wallet invocation scheme (openid-credential-offer:// by default, haip:// if requested)
+    const invocationScheme =
+      req.query.url_scheme === "haip" ? URL_SCHEMES.HAIP : URL_SCHEMES.STANDARD;
+
+    const credentialOffer = createCodeFlowCredentialOfferResponse(
+      sessionId,
+      credentialType,
+      client_id_scheme,
+      true,
+      invocationScheme
+    );
+    const encodedQR = await generateQRCode(credentialOffer, sessionId);
+    
+    res.json({
+      qr: encodedQR,
+      deepLink: credentialOffer,
+      sessionId,
+    });
+  } catch (error) {
+    handleRouteError(error, "offer-code-sd-jwt", res, sessionId);
+  }
+});
+
+codeFlowRouterSDJWT.get(["/offer-code-sd-jwt-dynamic"], async (req, res) => {
+  let sessionId;
+  try {
+    sessionId = getSessionId(req);
+    bindSessionLoggingContext(req, res, sessionId);
+
+    const credentialType = getCredentialType(req);
+    const client_id_scheme = getClientIdScheme(req);
+
+    const sessionData = createCodeFlowSession(client_id_scheme, "code", true);
+    await manageSession(sessionId, sessionData);
+
+    const invocationScheme =
+      req.query.url_scheme === "haip" ? URL_SCHEMES.HAIP : URL_SCHEMES.STANDARD;
+
+    const credentialOffer = createCodeFlowCredentialOfferResponse(
+      sessionId,
+      credentialType,
+      client_id_scheme,
+      false,
+      invocationScheme
+    );
+    const encodedQR = await generateQRCode(credentialOffer, sessionId);
+    
+    res.json({
+      qr: encodedQR,
+      deepLink: credentialOffer,
+      sessionId,
+    });
+  } catch (error) {
+    handleRouteError(error, "offer-code-sd-jwt-dynamic", res, sessionId);
+  }
+});
+
+codeFlowRouterSDJWT.get(["/offer-code-defered"], async (req, res) => {
+  let sessionId;
+  try {
+    sessionId = getSessionId(req);
+    bindSessionLoggingContext(req, res, sessionId);
+
+    const credentialType = getCredentialType(req);
+    const client_id_scheme = getClientIdScheme(req);
+
+    const sessionData = createCodeFlowSession(client_id_scheme, "code", false, true);
+    await manageSession(sessionId, sessionData);
+
+    const invocationScheme =
+      req.query.url_scheme === "haip" ? URL_SCHEMES.HAIP : URL_SCHEMES.STANDARD;
+
+    const credentialOffer = createCodeFlowCredentialOfferResponse(
+      sessionId,
+      credentialType,
+      client_id_scheme,
+      false,
+      invocationScheme
+    );
+    const encodedQR = await generateQRCode(credentialOffer, sessionId);
+    
+    res.json({
+      qr: encodedQR,
+      deepLink: credentialOffer,
+      sessionId,
+    });
+  } catch (error) {
+    handleRouteError(error, "offer-code-defered", res, sessionId);
+  }
+});
+
+// auth code-flow request
+// with dynamic cred request and client_id_scheme == redirect_uri
+codeFlowRouterSDJWT.get(["/credential-offer-code-sd-jwt/:id"], (req, res) => {
+  const sessionId = req.params.id;
+  try {
+    bindSessionLoggingContext(req, res, sessionId);
+    const credentialType = getCredentialType(req);
+    const config = createCredentialOfferConfig(credentialType, sessionId, false, "authorization_code");
+    res.json(config);
+  } catch (error) {
+    handleRouteError(error, "credential-offer-code-sd-jwt", res, sessionId);
+  }
+});
+
+/***************************************************************
+ *               Push Authorization Request Endpoints
+ * https://datatracker.ietf.org/doc/html/rfc9126
+ ***************************************************************/
+codeFlowRouterSDJWT.post(["/par", "/authorize/par"], async (req, res) => {
+  let issuerState = null;
+  let slog = null;
+  let requestId = null;
+  
+  try {
+    issuerState = req.body?.issuer_state ? decodeURIComponent(req.body.issuer_state) : null;
+    if (issuerState) {
+      slog = makeSessionLogger(issuerState);
+      bindSessionLoggingContext(req, res, issuerState);
+    }
+
+    const requestData = {
+      client_id: req.body.client_id,
+      scope: req.body.scope,
+      response_type: req.body.response_type,
+      redirect_uri: req.body.redirect_uri,
+      code_challenge: req.body.code_challenge,
+      code_challenge_method: req.body.code_challenge_method,
+      claims: req.body.claims,
+      state: req.body.state,
+      authorizationHeader: req.get("Authorization"),
+      responseType: req.body.response_type,
+      issuerState,
+      authorizationDetails: req.body.authorization_details,
+      clientMetadata: req.body.client_metadata,
+      wallet_issuer_id: req.body.wallet_issuer_id,
+      user_hint: req.body.user_hint,
+    };
+
+    if (slog) {
+      const bodyForLog = { ...req.body };
+      if (bodyForLog.code_challenge) bodyForLog.code_challenge = "[REDACTED]";
+      requestId = logHttpRequest(slog, "POST", "/par", req.headers, bodyForLog);
+      try { slog("[ISSUER] [PAR] [START] Processing PAR request", { hasIssuerState: !!issuerState, hasState: !!requestData.state }); } catch {}
+    }
+
+    // Extract and validate Wallet Instance Attestation (WIA) if present
+    // Based on TS3 spec: https://github.com/eu-digital-identity-wallet/eudi-doc-standards-and-technical-specifications/blob/main/docs/technical-specifications/ts3-wallet-unit-attestation.md
+    const wiaJwt = extractWIAFromTokenRequest(req.body, req.headers);
+    if (wiaJwt) {
+      const wiaValidation = await validateWIA(wiaJwt, issuerState);
+      if (wiaValidation.valid) {
+        if (slog) {
+          try { slog("[ISSUER] [PAR] WIA validated successfully", { wiaIssuer: wiaValidation.payload?.iss, wiaExp: wiaValidation.payload?.exp }); } catch {}
+        }
+      } else {
+        if (slog) {
+          try { slog("[ISSUER] [PAR] [WARN] WIA validation failed (continuing without WIA)", { error: wiaValidation.error }); } catch {}
+        }
+      }
+    } else {
+      if (slog) {
+        try { slog("[ISSUER] [PAR] WIA not found (continuing without WIA)"); } catch {}
+      }
+    }
+
+    const result = createPARRequest(requestData);
+
+    if (slog) {
+      logHttpResponse(slog, requestId, "/par", 201, "Created", res.getHeaders(), result);
+      try { slog("[ISSUER] [PAR] [COMPLETE] PAR request processed successfully", { success: true, requestUri: result.request_uri }); } catch {}
+    }
+
+    res.statusCode = 201;
+    return res.json(result);
+  } catch (error) {
+    if (slog) {
+      try { slog("[ISSUER] [PAR] [ERROR] Error processing PAR request", { error: error.message }); } catch {}
+      logHttpResponse(slog, requestId, "/par", 500, "Internal Server Error", res.getHeaders(), { error: error.message });
+    }
+    handleRouteError(error, "PAR endpoint", res, issuerState);
+  }
+});
+
+/*********************************************************************************
+ *               Authorization request
+ *
+ * Two ways to request authorization
+ * One way is to use the authorization_details request parameter with one or more authorization details objects of type openid_credential
+ * Second way is through the use of scope
+ ****************************************************************/
+codeFlowRouterSDJWT.get("/authorize", async (req, res) => {
+  let slog = null;
+  let requestId = null;
+  
+  try {
+    // Extract and process request parameters
+    let requestData = {
+      response_type: req.query.response_type,
+      issuerState: decodeURIComponent(req.query.issuer_state),
+      state: req.query.state,
+      client_id: decodeURIComponent(req.query.client_id),
+      authorizationDetails: req.query.authorization_details,
+      scope: req.query.scope,
+      redirect_uri: req.query.redirect_uri,
+      code_challenge: decodeURIComponent(req.query.code_challenge),
+      code_challenge_method: req.query.code_challenge_method,
+      client_metadata: req.query.client_metadata,
+      nonce: req.query.nonce,
+      wallet_issuer_id: req.query.wallet_issuer_id,
+      user_hint: req.query.user_hint,
+      request_uri: req.query.request_uri,
+    };
+
+    if (requestData.issuerState) {
+      slog = makeSessionLogger(requestData.issuerState);
+      bindSessionLoggingContext(req, res, requestData.issuerState);
+    }
+
+    if (slog) {
+      const queryForLog = { ...req.query };
+      if (queryForLog.code_challenge) queryForLog.code_challenge = "[REDACTED]";
+      requestId = logHttpRequest(slog, "GET", "/authorize", req.headers, queryForLog);
+      try { slog("[ISSUER] [AUTHORIZATION] [START] Processing authorization request", { hasRequestUri: !!requestData.request_uri, hasState: !!requestData.state }); } catch {}
+    }
+
+    // Handle PAR request if present
+    const parRequest = handlePARRequest(requestData.request_uri);
+    if (parRequest) {
+      requestData = { ...requestData, ...parRequest };
+    }
+
+    console.log("wallet_issuer_id: " + requestData.wallet_issuer_id);
+    console.log("user_hint: " + requestData.user_hint);
+
+    const redirectUri = requestData.redirect_uri ? decodeURIComponent(requestData.redirect_uri) : DEFAULT_REDIRECT_URI;
+
+    // Parse client metadata
+    try {
+      if (requestData.client_metadata) {
+        JSON.parse(decodeURIComponent(requestData.client_metadata));
+      } else {
+        console.log("client_metadata was missing");
+      }
+    } catch (error) {
+      console.log("client_metadata was missing");
+      console.log(error);
+    }
+
+    // Extract credentials and determine flow type
+    let credentialsRequested = [];
+    let isPIDIssuanceFlow = false;
+
+    if (requestData.authorizationDetails) {
+      const parsedAuthDetails = parseAuthorizationDetails(requestData.authorizationDetails);
+      const result = extractCredentialsFromAuthorizationDetails(parsedAuthDetails);
+      credentialsRequested = result.credentials;
+      isPIDIssuanceFlow = result.isPIDIssuanceFlow;
+    } else {
+      console.log("authorization_details not found trying scope");
+      const result = extractCredentialsFromScope(requestData.scope);
+      credentialsRequested = result.credentials;
+      isPIDIssuanceFlow = result.isPIDIssuanceFlow;
+      
+      if (credentialsRequested.length === 0) {
+        const received = requestData.scope ? `scope: '${requestData.scope}'` : 'no scope or authorization_details';
+        throw new Error(`${ERROR_MESSAGES.NO_CREDENTIALS_REQUESTED}. Received: ${received}, expected: scope or authorization_details with credential identifiers. See ${SPEC_REFS.VCI_AUTHORIZATION}`);
+      }
+    }
+
+    // Get and update session
+    let existingCodeSession = await getCodeFlowSession(requestData.issuerState);
+    if (!existingCodeSession) {
+      // Note: Can't mark session as failed since session doesn't exist
+      throw new Error(`${ERROR_MESSAGES.ITB_SESSION_EXPIRED}. Received: issuerState '${requestData.issuerState}' not found, expected: valid, unexpired session. See ${SPEC_REFS.VCI_AUTHORIZATION}`);
+    }
+
+    const updatedRequestData = {
+      ...requestData,
+      redirectUri,
+      credentialsRequested,
+      isPIDIssuanceFlow,
+    };
+
+    existingCodeSession = updateSessionForAuthorization(existingCodeSession, updatedRequestData);
+    await storeCodeFlowSession(requestData.issuerState, existingCodeSession);
+
+    // Validate request
+    const errors = validateAuthorizationRequest(
+      requestData.response_type,
+      requestData.code_challenge,
+      requestData.authorizationDetails
+    );
+
+    if (errors.length > 0) {
+      console.error("Validation errors:", errors);
+      const error_description = errors.join(" ");
+      const encodedErrorDescription = encodeURIComponent(error_description.trim());
+      const errorRedirectUrl = `${redirectUri}?error=invalid_request&error_description=${encodedErrorDescription}`;
+      
+      existingCodeSession.status = "failed";
+      if (existingCodeSession.results) {
+        existingCodeSession.results.status = "failed";
+      } else {
+        existingCodeSession.results = { status: "failed" };
+      }
+      await storeCodeFlowSession(requestData.issuerState, existingCodeSession);
+
+      return res.redirect(302, errorRedirectUrl);
+    }
+
+    // Handle authorization based on flow type
+    let redirectUrl;
+    if (existingCodeSession.isDynamic) {
+      redirectUrl = handleDynamicAuthorizationRedirect(existingCodeSession, updatedRequestData);
+    } else {
+      redirectUrl = await handleNonDynamicAuthorization(existingCodeSession, updatedRequestData);
+    }
+
+    if (slog) {
+      logHttpResponse(slog, requestId, "/authorize", 302, "Found", res.getHeaders(), { redirectUrl });
+      try { slog("[ISSUER] [AUTHORIZATION] [COMPLETE] Authorization request processed successfully", { success: true, isDynamic: existingCodeSession.isDynamic }); } catch {}
+    }
+    
+    return res.redirect(302, redirectUrl);
+  } catch (error) {
+    if (slog) {
+      try { slog("[ISSUER] [AUTHORIZATION] [ERROR] Error processing authorization request", { error: error.message }); } catch {}
+      logHttpResponse(slog, requestId, "/authorize", 500, "Internal Server Error", res.getHeaders(), { error: error.message });
+    }
+    
+    // Try to mark session as failed if we have issuerState
+    try {
+      const issuerState = req.query?.issuer_state ? decodeURIComponent(req.query.issuer_state) : null;
+      if (issuerState) {
+        const existingCodeSession = await getCodeFlowSession(issuerState);
+        if (existingCodeSession) {
+          existingCodeSession.status = "failed";
+          if (existingCodeSession.results) {
+            existingCodeSession.results.status = "failed";
+          } else {
+            existingCodeSession.results = { status: "failed" };
+          }
+          existingCodeSession.error = "invalid_request";
+          existingCodeSession.error_description = error.message;
+          await storeCodeFlowSession(issuerState, existingCodeSession);
+        }
+      }
+    } catch (sessionError) {
+      if (slog) {
+        try { slog("[ISSUER] [AUTHORIZATION] [WARN] Failed to update session status after authorize error", { error: sessionError.message }); } catch {}
+      }
+    }
+    
+    const errorRedirectUrl = `${DEFAULT_REDIRECT_URI}?error=invalid_request&error_description=${encodeURIComponent(error.message)}`;
+    return res.redirect(302, errorRedirectUrl);
+  }
+});
+
+// **************************************************
+// ************ DYNAMIC VP REQUESTS ************
+// **************************************************
+// Dynamic VP request by reference endpoint
+codeFlowRouterSDJWT.get("/x509VPrequest_dynamic/:id", async (req, res) => {
+  let sessionId;
+  try {
+    sessionId = req.params.id || uuidv4();
+    bindSessionLoggingContext(req, res, sessionId);
+    const signedVPJWT = await buildVPRequestJWTForX509(sessionId);
+    console.log(signedVPJWT);
+    res.type("text/plain").send(signedVPJWT);
+  } catch (error) {
+    handleRouteError(error, "x509VPrequest_dynamic", res, sessionId);
+  }
+});
+
+codeFlowRouterSDJWT.get("/didJwksVPrequest_dynamic/:id", async (req, res) => {
+  let sessionId;
+  try {
+    sessionId = req.params.id || uuidv4();
+    bindSessionLoggingContext(req, res, sessionId);
+    const signedVPJWT = await buildVPRequestJWTForDid(sessionId);
+    res.type("text/plain").send(signedVPJWT);
+  } catch (error) {
+    handleRouteError(error, "didJwksVPrequest_dynamic", res, sessionId);
+  }
+});
+
+// Dynamic VP request with only id_token
+codeFlowRouterSDJWT.get("/id_token_x509_request_dynamic/:id", async (req, res) => {
+  let sessionId;
+  try {
+    sessionId = req.params.id || uuidv4();
+    bindSessionLoggingContext(req, res, sessionId);
+    const existingCodeSession = await getCodeFlowSession(sessionId);
+    const signedVPJWT = await buildIdTokenRequestJWTForX509(sessionId, existingCodeSession);
+    console.log(signedVPJWT);
+    res.type("text/plain").send(signedVPJWT);
+  } catch (error) {
+    handleRouteError(error, "id_token_x509_request_dynamic", res, sessionId);
+  }
+});
+
+codeFlowRouterSDJWT.get("/id_token_did_request_dynamic/:id", async (req, res) => {
+  let sessionId;
+  try {
+    sessionId = req.params.id || uuidv4();
+    bindSessionLoggingContext(req, res, sessionId);
+    const existingCodeSession = await getCodeFlowSession(sessionId);
+    const signedVPJWT = await buildIdTokenRequestJWTForDid(sessionId, existingCodeSession);
+    res.type("text/plain").send(signedVPJWT);
+  } catch (error) {
+    handleRouteError(error, "id_token_did_request_dynamic", res, sessionId);
+  }
+});
+
+/*
+  presentation by the wallet during an Issuance part of the Dynamic Credential Request 
+*/
+codeFlowRouterSDJWT.post("/direct_post_vci/:id", async (req, res) => {
+  const issuerState = req.params.id;
+  try {
+    bindSessionLoggingContext(req, res, issuerState);
+    console.log("direct_post VP for VCI is below!");
+    const state = req.body.state;
+    const jwt = req.body.vp_token;
+    console.log("direct_post_vci state" + issuerState);
+
+    if (!jwt) {
+      const received = req.body.vp_token === undefined ? "vp_token missing" : `vp_token is ${typeof req.body.vp_token}`;
+      console.log(`${ERROR_MESSAGES.NO_JWT_PRESENTED}. Received: ${received}, expected: vp_token JWT string`);
+      
+      // Try to mark session as failed if we have issuerState
+      try {
+        const existingCodeSession = await getCodeFlowSession(issuerState);
+        if (existingCodeSession) {
+          existingCodeSession.status = "failed";
+          if (existingCodeSession.results) {
+            existingCodeSession.results.status = "failed";
+          } else {
+            existingCodeSession.results = { status: "failed" };
+          }
+          existingCodeSession.error = "invalid_request";
+          existingCodeSession.error_description = `${ERROR_MESSAGES.NO_JWT_PRESENTED}. Received: ${received}, expected: vp_token JWT string`;
+          await storeCodeFlowSession(issuerState, existingCodeSession);
+        }
+      } catch (sessionError) {
+        console.error("Failed to update session status after JWT missing error:", sessionError);
+      }
+      
+      return res.sendStatus(500);
+    }
+
+    const authorizationDetails = getSessionsAuthorizationDetail().get(state);
+    const authorizationCode = generateNonce(16);
+    getAuthCodeAuthorizationDetail().set(authorizationCode, authorizationDetails);
+
+    console.log("wallet state " + state);
+
+    const existingCodeSession = await getCodeFlowSession(issuerState);
+    if (!existingCodeSession) {
+      console.log(`${ERROR_MESSAGES.ISSUANCE_SESSION_NOT_FOUND}. Received: issuerState '${issuerState}' not found, expected: valid session`);
+      // Note: Can't mark session as failed since session doesn't exist
+      return res.sendStatus(500);
+    }
+
+    const issuanceState = existingCodeSession.results.state;
+    existingCodeSession.results.sessionId = authorizationCode;
+    existingCodeSession.requests.sessionId = authorizationCode;
+    await storeCodeFlowSession(issuanceState, existingCodeSession);
+
+    const redirectUrl = `${existingCodeSession.requests.redirectUri}?code=${authorizationCode}&state=${existingCodeSession.requests.state}`;
+    return res.send({ redirect_uri: redirectUrl });
+  } catch (error) {
+    // Try to mark session as failed if we have issuerState
+    try {
+      if (issuerState) {
+        const existingCodeSession = await getCodeFlowSession(issuerState);
+        if (existingCodeSession) {
+          existingCodeSession.status = "failed";
+          if (existingCodeSession.results) {
+            existingCodeSession.results.status = "failed";
+          } else {
+            existingCodeSession.results = { status: "failed" };
+          }
+          existingCodeSession.error = "server_error";
+          existingCodeSession.error_description = error.message;
+          await storeCodeFlowSession(issuerState, existingCodeSession);
+        }
+      }
+    } catch (sessionError) {
+      console.error("Failed to update session status after direct_post_vci error:", sessionError);
+    }
+    
+    handleRouteError(error, "direct_post_vci", res, issuerState);
+  }
+});
+
+// Function to fetch either vct or credential_configuration_id
+function fetchVCTorCredentialConfigId(data) {
+  // 1. Handle the structure from the user's first modification (most specific)
+  if (
+    data.credential_definition &&
+    data.credential_definition.type &&
+    Array.isArray(data.credential_definition.type) &&
+    data.credential_definition.type.length > 0
+  ) {
+    return data.credential_definition.type[0];
+  }
+
+  // 2. Handle 'credential_configuration_id'
+  // (Covers A, C, D part 1, E part 1 from examples)
+  if (data.credential_configuration_id) {
+    return data.credential_configuration_id;
+  }
+
+  // 3. Handle 'format' and its associated fields
+  if (data.format) {
+    // For 'vc+sd-jwt' format, use 'vct' (Covers B from examples)
+    if (data.format === "vc+sd-jwt" && data.vct) {
+      return data.vct;
+    }
+    // For 'mso_mdoc' format, use 'doctype' (Covers D part 2 from examples)
+    if (data.format === "mso_mdoc" && data.doctype) {
+      return data.doctype;
+    }
+  }
+
+  // 4. Fallback for the original `data.vct` if it wasn't caught by format-specific logic
+  // This respects the original function's high priority for `vct`.
+  if (data.vct) {
+    return data.vct;
+  }
+
+  // 5. Fallback to 'types' (from original function structure)
+  if (data.types) {
+    return data.types;
+  }
+
+  return null; // If none of the above, return null
+}
+
+export default codeFlowRouterSDJWT;

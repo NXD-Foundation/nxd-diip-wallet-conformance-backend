@@ -1,0 +1,782 @@
+// Specification references
+const SPEC_REFS = {
+  VP_1_0: "https://openid.net/specs/openid-4-verifiable-presentations-1_0.html",
+  VP_CREDENTIAL_RESPONSE: "https://openid.net/specs/openid-4-verifiable-presentations-1_0.html#name-credential-response",
+  VP_PRESENTATION_SUBMISSION: "https://openid.net/specs/openid-4-verifiable-presentations-1_0.html#name-presentation-submission",
+};
+
+import jp from "jsonpath";
+import jwt from "jsonwebtoken";
+import { decodeSdJwt, getClaims } from "@sd-jwt/decode";
+import { digest } from "@sd-jwt/crypto-nodejs";
+import { getVPSession } from "../services/cacheServiceRedis.js";
+import zlib from 'zlib';
+import base64url from 'base64url';
+
+/**
+ * Placeholder decoding/parsing functions.
+ * Implement these according to the specific standards and libraries you use.
+ */
+async function decodeJwtVC(jwtString) {
+  return jwt.decode(jwtString, { complete: true });
+}
+
+/**
+ * Extracts claims from the request body.
+ *
+ * @param {Object} req - The Express request object.
+ * @param {string} digest - The digest used for decoding SDJWT.
+ * @returns {Promise<Array>} - An array of extracted claims.
+ * @throws {Error} - Throws error if validation fails or processing encounters issues.
+ */
+export async function extractClaimsFromRequest(req, digest, isPaymentVP, sessionIdentifier) {
+  const sessionId = req.params?req.params.id:sessionIdentifier;
+  let extractedClaims = [];
+  let keybindJwt; // This might need to be an array if multiple SD-JWTs with different kbJwts are possible
+
+  const vpToken = req.body["vp_token"];
+  if (!vpToken) {
+    const received = req.body["vp_token"] === undefined ? "vp_token missing" : `vp_token is ${typeof req.body["vp_token"]}`;
+    throw new Error(`No vp_token found in the request body. Received: ${received}, expected: vp_token string or object. See ${SPEC_REFS.VP_CREDENTIAL_RESPONSE}`);
+  }
+
+  const presentationSubmission = req.body["presentation_submission"];
+
+  if (presentationSubmission) {
+    // PEX flow
+    console.log("Processing with PEX flow (presentation_submission found).");
+    const sessionData = await getVPSession(sessionId);
+    const requestedInputDescriptors =
+      sessionData.presentation_definition.input_descriptors;
+
+    const state = req.body["state"];
+
+    let descriptorMap;
+    try {
+      descriptorMap = JSON.parse(presentationSubmission).descriptor_map;
+    } catch (err) {
+      const received = typeof presentationSubmission === 'string' ? `string (parse error: ${err.message})` : typeof presentationSubmission;
+      throw new Error(`Invalid JSON format for presentation_submission. Received: ${received}, expected: valid JSON string. See ${SPEC_REFS.VP_PRESENTATION_SUBMISSION}`);
+    }
+
+    if (!Array.isArray(descriptorMap)) {
+      const received = Array.isArray(descriptorMap) ? 'array' : typeof descriptorMap;
+      throw new Error(`descriptor_map is not an array. Received: ${received}, expected: array. See ${SPEC_REFS.VP_PRESENTATION_SUBMISSION}`);
+    }
+
+    const isValidDescriptorEntry = compareSubmissionToDefinition(
+      JSON.parse(presentationSubmission),
+      requestedInputDescriptors
+    );
+    if (!isValidDescriptorEntry) {
+      const received = "descriptor_map does not match presentation_definition";
+      throw new Error(`invalid descriptor entry. Received: ${received}, expected: descriptor_map matching presentation_definition input_descriptors. See ${SPEC_REFS.VP_PRESENTATION_SUBMISSION}`);
+    }
+    
+    
+    for (const descriptor of descriptorMap) {
+      const vpResult = await processDescriptorEntry(
+        vpToken, // This is the outer JWT (VP) when path_nested is used
+        descriptor,
+        requestedInputDescriptors
+      );
+
+      if (vpResult === null) {
+        console.warn(
+          `Skipping descriptor with id '${descriptor.id}' due to null vpResult.`
+        );
+        continue;
+      }
+
+      // vpResult could be a single credential string or an array of them (from jp.query in nested).
+      // It could also be the original vpToken if it's a root jwt_vc_json or sd-jwt.
+      // Normalize to an array of credential strings to process.
+      let credentialStringsToProcess = [];
+      if (typeof vpResult === "string") {
+        // If it's a root JWT (either sd-jwt or plain jwt_vc_json) or a single nested result
+        credentialStringsToProcess.push(vpResult);
+      } else if (Array.isArray(vpResult)) {
+        // If jp.query returned an array of JWT strings (nested case)
+        credentialStringsToProcess = vpResult.filter(
+          (item) => typeof item === "string"
+        );
+      } else {
+        console.warn(
+          `vpResult for descriptor id '${descriptor.id}' is neither a string nor an array of strings. Skipping.`,
+          vpResult
+        );
+        continue;
+      }
+
+      if (
+        credentialStringsToProcess.length === 0 &&
+        (descriptor.format === "vc+sd-jwt" ||
+          descriptor.format === "dc+sd-jwt" ||
+          descriptor.format === "jwt_vc_json" ||
+          descriptor.format === "jwt_vp")
+      ) {
+        // If vpResult was the vpToken itself (e.g. root and format matches sd-jwt or jwt_vc_json)
+        // and it wasn't caught by the string check (e.g. if vpToken itself was complex and processDescriptorEntry returned it directly),
+        // this is a fallback, though processDescriptorEntry should ideally return a string here.
+        // This might indicate an issue in processDescriptorEntry if vpResult is not a string for root jwt_vc_json/sd-jwt.
+        // For now, let's assume processDescriptorEntry returns the string for root cases.
+        // If vpResult IS the vpToken (outer JWT) and format is jwt_vc_json, it implies vpToken *is* the credential.
+        // If format is sd-jwt, vpToken *is* the sd-jwt.
+        console.log(
+          `Processing vpResult for descriptor id '${descriptor.id}' which is likely the root vpToken.`
+        );
+      }
+
+      for (const credString of credentialStringsToProcess) {
+        try {
+          if (
+            descriptor.format === "vc+sd-jwt" ||
+            descriptor.format === "dc+sd-jwt" ||
+            descriptor.format === "jwt_vp"
+          ) {
+            const decodedSdJwt = await decodeSdJwt(credString, digest);
+            if (decodedSdJwt.kbJwt) {
+                keybindJwt = decodedSdJwt.kbJwt
+            }
+            const claims = await getClaims(
+              decodedSdJwt.jwt.payload,
+              decodedSdJwt.disclosures,
+              digest
+            );
+            extractedClaims.push(claims);
+          } else if (descriptor.format === "jwt_vc_json") {
+            const decodedJwt = await decodeJwtVC(credString); // Using your existing decodeJwtVC
+            if (decodedJwt && decodedJwt.payload) {
+              extractedClaims.push(decodedJwt.payload);
+              // keybindJwt is typically not part of a plain jwt_vc_json unless a custom mechanism is used.
+              // If there's a cnf claim with jwk, it could be related but not directly a kbJwt.
+            } else {
+              const received = decodedJwt ? "decoded JWT without payload" : "failed to decode JWT";
+              console.error(
+                `Failed to decode jwt_vc_json or payload missing. Received: ${received}, expected: valid JWT with payload`,
+                credString
+              );
+              throw new Error(`Failed to decode jwt_vc_json. Received: ${received}, expected: valid JWT with payload`);
+            }
+          } else {
+            console.warn(
+              `Unsupported format '${descriptor.format}' for descriptor id '${descriptor.id}'. Skipping credential.`
+            );
+          }
+        } catch (e) {
+          console.error(
+            `Error processing credential for descriptor id '${descriptor.id}', format '${descriptor.format}':`,
+            credString,
+            e
+          );
+          // Decide if one error should stop all processing or just skip this credential
+          // For now, let's throw to indicate a problem with a specific submission component.
+          throw new Error(
+            `Failed to process submitted credential for descriptor ${descriptor.id}.`
+          );
+        }
+      }
+    }
+  } else {
+    // Non-PEX flow (e.g., for DCQL) where presentation_submission is not provided.
+    console.log("Processing with non-PEX flow (no presentation_submission).");
+    try {
+      // Helper to select values from an object using DCQL claim path arrays
+      // Each DCQL path is an array of segments, e.g., ["org.iso.18013.5.1", "family_name"]
+      const selectByDcqlPaths = (sourceObj, dcqlPaths) => {
+        if (!sourceObj || typeof sourceObj !== 'object') return {};
+        const result = {};
+        const setDeep = (obj, pathSegments, value) => {
+          let cursor = obj;
+          for (let i = 0; i < pathSegments.length; i++) {
+            const segment = pathSegments[i];
+            if (i === pathSegments.length - 1) {
+              cursor[segment] = value;
+            } else {
+              if (cursor[segment] === undefined || typeof cursor[segment] !== 'object' || Array.isArray(cursor[segment])) {
+                cursor[segment] = {};
+              }
+              cursor = cursor[segment];
+            }
+          }
+        };
+        const getDeep = (obj, pathSegments) => {
+          let cursor = obj;
+          for (const segment of pathSegments) {
+            if (!cursor || typeof cursor !== 'object') return undefined;
+            cursor = cursor[segment];
+          }
+          return cursor;
+        };
+
+        for (const p of dcqlPaths) {
+          // Support both ["a","b"] and "a.b" just in case
+          const segments = Array.isArray(p) ? p : (typeof p === 'string' ? p.split('.') : []);
+          if (!segments.length) continue;
+          const value = getDeep(sourceObj, segments);
+          if (value !== undefined) {
+            setDeep(result, segments, value);
+          }
+        }
+        return result;
+      };
+
+      // Collect requested DCQL claim paths (arrays of segments)
+      const vpSessionForDcql = await getVPSession(sessionId).catch(() => null);
+      const dcqlClaimPaths = [];
+      if (vpSessionForDcql && vpSessionForDcql.dcql_query && Array.isArray(vpSessionForDcql.dcql_query.credentials)) {
+        for (const cred of vpSessionForDcql.dcql_query.credentials) {
+          if (cred && Array.isArray(cred.claims)) {
+            for (const claim of cred.claims) {
+              if (claim && claim.path) {
+                dcqlClaimPaths.push(claim.path);
+              }
+            }
+          }
+        }
+      }
+
+      const tokensToProcess = [];
+      if (typeof vpToken === 'object' && vpToken !== null && !Array.isArray(vpToken)) {
+        // vpToken is an object like { cmwallet: ["...", "..."], other: "..." }
+        for (const value of Object.values(vpToken)) {
+          if (Array.isArray(value)) {
+            for (const item of value) {
+              if (typeof item === 'string') tokensToProcess.push(item);
+            }
+          } else if (typeof value === 'string') {
+            tokensToProcess.push(value);
+          }
+        }
+      } else if (typeof vpToken === 'string') {
+        // Fallback for single token or stringified JSON
+        try {
+          const parsed = JSON.parse(vpToken);
+          if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+            for (const value of Object.values(parsed)) {
+              if (Array.isArray(value)) {
+                for (const item of value) {
+                  if (typeof item === 'string') tokensToProcess.push(item);
+                }
+              } else if (typeof value === 'string') {
+                tokensToProcess.push(value);
+              }
+            }
+          } else {
+            tokensToProcess.push(vpToken);
+          }
+        } catch (e) {
+          tokensToProcess.push(vpToken); // Not JSON, treat as raw token.
+        }
+      } else {
+        const received = typeof vpToken === 'object' && vpToken !== null ? (Array.isArray(vpToken) ? 'array' : 'object') : typeof vpToken;
+        throw new Error(`Unsupported vp_token format for non-PEX flow. Received: ${received}, expected: object with credential arrays or string`);
+      }
+
+      for (const token of tokensToProcess) {
+        if (typeof token !== 'string') continue;
+
+        try {
+          if (token.includes("~")) { // Heuristic for SD-JWT
+            console.log(`[DEBUG extractClaimsFromRequest] Processing SD-JWT token, length: ${token.length}, tildes: ${(token.match(/~/g) || []).length}`);
+            const decodedSdJwt = await decodeSdJwt(token, digest);
+            console.log(`[DEBUG extractClaimsFromRequest] decodeSdJwt result:`, {
+              hasKbJwt: !!decodedSdJwt.kbJwt,
+              kbJwtType: typeof decodedSdJwt.kbJwt,
+              kbJwtValue: decodedSdJwt.kbJwt 
+                ? (typeof decodedSdJwt.kbJwt === 'string' 
+                    ? decodedSdJwt.kbJwt.substring(0, 100) + '...' 
+                    : JSON.stringify(decodedSdJwt.kbJwt).substring(0, 200))
+                : 'null/undefined',
+              decodedKeys: Object.keys(decodedSdJwt),
+              kbJwtIsObject: typeof decodedSdJwt.kbJwt === 'object',
+              kbJwtKeys: decodedSdJwt.kbJwt && typeof decodedSdJwt.kbJwt === 'object' ? Object.keys(decodedSdJwt.kbJwt) : 'N/A'
+            });
+            if (decodedSdJwt.kbJwt) {
+              try {
+                keybindJwt = jwt.decode(decodedSdJwt.kbJwt, { complete: true });
+                console.log(`[DEBUG extractClaimsFromRequest] Successfully decoded kbJwt:`, {
+                  hasPayload: !!keybindJwt.payload,
+                  payloadKeys: keybindJwt.payload ? Object.keys(keybindJwt.payload) : 'N/A'
+                });
+              } catch (e) {
+                console.warn("Failed to decode kbJwt, passing raw string.", e);
+                keybindJwt = decodedSdJwt.kbJwt;
+              }
+            } else {
+              console.warn(`[DEBUG extractClaimsFromRequest] No kbJwt found in decodedSdJwt despite token having tildes`);
+            }
+            const claims = await getClaims(decodedSdJwt.jwt.payload, decodedSdJwt.disclosures, digest);
+
+            if (claims.vp && Array.isArray(claims.vp.verifiableCredential)) {
+              for (const vcJwt of claims.vp.verifiableCredential) {
+                if (typeof vcJwt !== 'string') continue;
+                if (vcJwt.includes("~")) {
+                  const decodedVc = await decodeSdJwt(vcJwt, digest);
+                  const vcClaims = await getClaims(decodedVc.jwt.payload, decodedVc.disclosures, digest);
+                  // Apply DCQL claim filtering if dcql_query provided in session
+                  if (dcqlClaimPaths.length > 0) {
+                    extractedClaims.push(selectByDcqlPaths(vcClaims, dcqlClaimPaths));
+                  } else {
+                    extractedClaims.push(vcClaims);
+                  }
+                } else {
+                  const decodedVc = await decodeJwtVC(vcJwt);
+                  if (decodedVc && decodedVc.payload) {
+                    if (dcqlClaimPaths.length > 0) {
+                      extractedClaims.push(selectByDcqlPaths(decodedVc.payload, dcqlClaimPaths));
+                    } else {
+                      extractedClaims.push(decodedVc.payload);
+                    }
+                  }
+                }
+              }
+            } else {
+              // single VC
+              if (dcqlClaimPaths.length > 0) {
+                extractedClaims.push(selectByDcqlPaths(claims, dcqlClaimPaths));
+              } else {
+                extractedClaims.push(claims);
+              }
+            }
+          } else { // Handle standard JWT
+            const decodedJwt = await decodeJwtVC(token);
+            const payload = decodedJwt ? decodedJwt.payload : null;
+            if (payload) {
+              if (payload.vp && Array.isArray(payload.vp.verifiableCredential)) {
+                for (const vcJwt of payload.vp.verifiableCredential) {
+                  const decodedVc = await decodeJwtVC(vcJwt);
+                  if (decodedVc && decodedVc.payload) {
+                    if (dcqlClaimPaths.length > 0) {
+                      extractedClaims.push(selectByDcqlPaths(decodedVc.payload, dcqlClaimPaths));
+                    } else {
+                      extractedClaims.push(decodedVc.payload);
+                    }
+                  }
+                }
+              } else {
+                // single VC
+                if (dcqlClaimPaths.length > 0) {
+                  extractedClaims.push(selectByDcqlPaths(payload, dcqlClaimPaths));
+                } else {
+                  extractedClaims.push(payload);
+                }
+              }
+            } else {
+               console.warn("Could not decode non-SD-JWT, skipping:", token);
+            }
+          }
+        } catch (e) {
+          console.error("Error processing token inside non-PEX response, skipping.", e);
+        }
+      }
+    } catch (e) {
+      console.error("Error processing non-PEX VP token:", e);
+      throw new Error("Failed to process VP token.");
+    }
+  }
+
+  // console.log("Final keybindJwt (could be from the last processed SD-JWT with one):");
+  // console.log(keybindJwt);
+  return { sessionId, extractedClaims, keybindJwt };
+}
+
+export async function validatePoP(
+  oauthClientAttestation,
+  oauthClientAttestationPoP,
+  clientId = "dss.aegean.gr"
+) {
+  const decodedWUA = await await decodeSdJwt(oauthClientAttestation, digest);
+  const decodedPoP = await jwt.decode(oauthClientAttestationPoP, {
+    complete: true,
+  });
+
+  const wuaSub = decodedWUA.jwt.payload.sub;
+  const popIss = decodedPoP.payload.iss;
+
+  //The value of iss must exactly match the sub claim of the the WUA JWT from section 3.1
+  // The value of aud must be the identifier of the relying party
+  if (wuaSub !== popIss || decodedPoP.payload.aud !== clientId) return false;
+  //The value of exp must be set so that the WUA PoP JWT's maximum lifetime is no longer than 24 hours
+  const nowInSeconds = Math.floor(Date.now() / 1000);
+  const lifetimeInSeconds = decodedPoP.payload.exp - nowInSeconds;
+  // Check if lifetime exceeds 24 hours (86400 seconds)
+  if (lifetimeInSeconds > 86400) {
+    return false;
+  }
+  return true;
+}
+
+export async function validateWUA(
+  oauthClientAttestation,
+  clientId = "dss.aegean.gr"
+) {
+  const decodedWUA = await await decodeSdJwt(oauthClientAttestation, digest);
+  // The alg used to sign the attestation must be ES256
+  if (!decodedWUA.jwt.header.alg === "ES256") return false;
+
+  //attested_security_context
+  const securityContext = decodedWUA.jwt.payload.attested_security_context;
+  if (securityContext !== "https://eudiwalletconsortium.org/") {
+    console.log(
+      `attested security context mismatch. Received: '${securityContext}', expected: 'https://eudiwalletconsortium.org/'`
+    );
+    return false;
+  }
+
+  // The kid must identify a JWK which must be resolvable as a JWK Set [5] by appending ./well-known/jwt-issuer to the value of the iss claim
+  const kid = decodedWUA.jwt.header.kid;
+  const iss = decodedWUA.jwt.payload.iss;
+  const parsed = new URL(iss);
+  const issuerURL = `${parsed.origin}/.well-known/jwt-vc-issuer${parsed.pathname}`;
+  const response = await fetch(issuerURL);
+  if (!response.ok) {
+    console.log(`could not fetch issuer URL. Received: HTTP ${response.status} from ${issuerURL}, expected: HTTP 200`);
+    return false;
+  }
+
+  let jwksUriJson;
+
+  const data = await response.json();
+  if (data.jwks_uri) {
+    const responseJwks = await fetch(data.jwks_uri);
+    if (!responseJwks.ok) {
+      console.log(`could not fetch JWKS URI. Received: HTTP ${responseJwks.status} from ${data.jwks_uri}, expected: HTTP 200`);
+      return false;
+    }
+    const dataJwks = await responseJwks.json();
+    jwksUriJson = dataJwks;
+  } else {
+    jwksUriJson = data;
+  }
+
+  const matchingKey = jwksUriJson.keys.find((value) => value.kid === kid);
+  if (!matchingKey) {
+    return false;
+  }
+
+  //TODO
+  //The attestation should include a status claim which contains a reference to a status list as defined in [4]
+  // and which allows the attestation provider to check the state of revocation of the wallet instance
+
+  /*
+    The JWT must include a status_list claim that is a JSON object containing:
+    bits: an integer that must be one of the allowed values (1, 2, 4, or 8).
+    lst: a base64url‑encoded string representing the compressed (using DEFLATE with the ZLIB format) bit array for the status list.
+     You then decode the lst value and decompress it to obtain the raw bit array. (At this point you can, if needed, check that the number of bits matches your expected number of referenced tokens.)
+  */
+  const statusListURI = decodedWUA.jwt.payload.status.status_list.uri;
+  let options = {
+    method: "GET",
+    headers: { Accept: "application/statuslist+jwt" },
+  };
+  const statusJwtResponse = await fetch(statusListURI, options);
+  if (!statusJwtResponse.ok) {
+    console.log(`could not fetch status list URI. Received: HTTP ${statusJwtResponse.status} from ${statusListURI}, expected: HTTP 200`);
+    return false;
+  }
+  const statusJwt = await statusJwtResponse.text();
+  const decodedStatus = jwt.decode(statusJwt, {
+    complete: true,
+  });
+  const statusListClaim = decodedStatus.payload.status_list;
+  if (
+    !statusListClaim ||
+    typeof statusListClaim.bits !== "number" ||
+    !statusListClaim.lst
+  ) {
+    const received = !statusListClaim ? "status_list claim missing" : typeof statusListClaim.bits !== "number" ? `bits is ${typeof statusListClaim.bits}` : "lst missing";
+    console.log(`Missing or invalid status_list claim. Received: ${received}, expected: status_list object with bits (number) and lst (string)`);
+    return false;
+  }
+  // Check that the "bits" value is one of the allowed sizes (1,2,4,8)
+  if (![1, 2, 4, 8].includes(statusListClaim.bits)) {
+    console.log(`Invalid bits value in status_list. Received: ${statusListClaim.bits}, expected: one of [1, 2, 4, 8]`);
+    return false;
+  }
+
+  const compressed = base64url.toBuffer(statusListClaim.lst);
+  let decompressed;
+  try {
+    decompressed = zlib.inflateSync(compressed);
+  } catch (err) {
+    console.log(`Failed to decompress status list. Received: compression error (${err.message}), expected: valid DEFLATE/ZLIB compressed data`);
+    return false;
+  }
+  // now that we have the actuall byte array (the decompressed buffer) 
+  // we can check the status of the specific wallet (the index contained in the WUA)
+  const tokenIndex = decodedWUA.jwt.payload.status.status_list.idx
+  return checkTokenStatus(decompressed, tokenIndex)
+}
+
+/**
+ * Process a single descriptor map entry, recursively handling path_nested.
+ * @param {Object} vpToken - The current "traversal" object (initially the top-level VP token payload).
+ * @param {Object} descriptor - A single entry from `descriptor_map`.
+ * @param {Object} requestedDescriptor - the request made by the verifier that the submission should match
+ * @returns The fully decoded Claim object or null if decoding fails.
+ */
+/*
+ vpToken,
+      descriptor,
+      extractedClaims,
+      requestedInputDescriptors
+*/
+export async function processDescriptorEntry(
+  vpToken,
+  descriptor,
+  requestedDescriptor
+) {
+  const { id, format, path, path_nested } = descriptor;
+
+
+
+  if (!path_nested) {
+    // the vp is in the root
+    if (format === "dc+sd-jwt" || format === "vc+sd-jwt" || format === "jwt_vc_json" || format === "jwt_vp") {
+      //return the root document that is the presented sd-jwt, jwt_vc_json, or jwt_vp
+      return vpToken;
+    } else {
+      console.log(
+        "presentation_submission format (root) " + format + " not supported"
+      );
+      return null;
+    }
+  } else {
+    // The VP is nested. vpToken is an outer JWT containing the credential/presentation.
+    // `format` is the format of the target credential/presentation.
+    // `path_nested.path` is the JSONPath to find it within the decoded `vpToken`.
+    const supportedNestedFormats = [
+      "dc+sd-jwt", // Current/preferred for SD-JWT
+      "vc+sd-jwt", // Older/alternative for SD-JWT
+      "jwt_vc_json",
+      "jwt_vp"
+    ];
+
+    if (supportedNestedFormats.includes(format)) {
+      try {
+        // decode the vpToken jwt (the outer presentation/container)
+        let decodedVpToken = await decodeJwtVC(vpToken);
+        if (!decodedVpToken || !decodedVpToken.payload) {
+            const received = !decodedVpToken ? "failed to decode JWT" : "decoded JWT without payload";
+            console.error(`Failed to decode vpToken or payload missing for nested VP/VC processing. Received: ${received}, expected: valid JWT with payload`);
+            return null;
+        }
+        //return an array of matching query elements from the payload (should be the JWT string(s))
+        return jp.query(decodedVpToken.payload, path_nested.path);
+      } catch (e) {
+        console.error("Error decoding or querying nested VP/VC:", e);
+        return null;
+      }
+    } else {
+      console.log(
+        `presentation_submission format (nested) "${format}" not supported for this extraction method.`
+      );
+      return null;
+    }
+  }
+}
+
+function compareSubmissionToDefinition(submission, definitionsArray) {
+  console.log("submission", submission);
+  console.log("definitionsArray", definitionsArray);
+
+  if (!Array.isArray(submission.descriptor_map)) {
+    const received = submission.descriptor_map === undefined ? "missing" : typeof submission.descriptor_map;
+    console.warn(`descriptor_map validation failed. Received: ${received}, expected: array`);
+    return false;
+  }
+
+  let matchingSubmissions = definitionsArray.filter((definition) => {
+
+    // Check that the root format (e.g. "vc+sd-jwt") also exists in definition.format
+    // For example, if descriptor_map[0].format = "vc+sd-jwt", ensure definition.format has that key
+    // support for legacy format "vc+sd-jwt" instead of dc+sd-jwt
+    for (const desc of submission.descriptor_map) {
+      let descFormat = desc.format; // e.g. "vc+sd-jwt"
+      if(descFormat === "vc+sd-jwt") {
+        descFormat = "dc+sd-jwt";
+      }
+      if (!definition.format || !definition.format[descFormat] ) {
+        const received = !definition.format ? "no format property" : `format does not include '${descFormat}'`;
+        console.warn(
+          `Definition format mismatch. Received: ${received}, expected: format object with '${descFormat}' key`
+        );
+        return false;
+      }
+
+      // 4) Find matching input_descriptor
+      if (definition.id !== desc.id) {
+        console.warn(
+          `No matching input_descriptor found. Received: descriptor_map id '${desc.id}', expected: input_descriptor id '${definition.id}'`
+        );
+        return false;
+      }
+
+      // 5) Compare descriptor_map.format with input_descriptor.format
+      //    i.e. check if input_descriptor.format has the same key as descFormat
+      // also added check for legacy format "vc+sd-jwt" instead of dc+sd-jwt
+      if (
+        definition.format[descFormat] === undefined || definition.format["vc+sd-jwt"] === null
+      ) {
+        console.warn(
+          `descriptor_map format mismatch. Received: format '${descFormat}' not found in input_descriptors, expected: format matching input_descriptor.format`
+        );
+        return false;
+      }
+
+      // 6) Check path_nested.format if applicable
+      if (desc.path_nested && desc.path_nested.format) {
+        const nestedFormat = desc.path_nested.format;
+        // For instance, if you want "jwt_vc" to match "vc+sd-jwt" in some logic:
+        // This might be an application-specific check. For example:
+        if (nestedFormat !== descFormat) {
+          console.warn(
+            `Nested format mismatch. Received: path_nested.format='${nestedFormat}', expected: '${descFormat}' (matching descriptor_map.format)`
+          );
+          // return false;  // Decide if you want to fail or just warn
+        }
+      }
+
+    }
+
+    // If we get here, everything passed the checks
+    return true;
+  });
+
+  return matchingSubmissions.length > 0;
+}
+
+/**
+ * Checks if a single data object contains only allowed fields,
+ * ignoring reserved JWT keys and the "cnf" property.
+ *
+ * @param {Object} dataObj - The data object to check.
+ * @param {string[]} allowedPaths - The list of allowed paths (with "$." prefix).
+ * @param {string[]} [ignoredKeys=['iss', 'iat', 'cnf', 'id','exp']] - Keys to ignore.
+ * @returns {boolean} - True if only allowed fields (besides ignored ones) are present.
+ */
+export function hasOnlyAllowedFields(
+  dataObj,
+  allowedPaths,
+  ignoredKeys = [
+    "iss",
+    "iat",
+    "cnf",
+    "id",
+    "exp",
+    "aud",
+    "sub",
+    "nonce",
+    "nbf",
+    "jti",
+  ]
+) {
+  // Convert allowedPaths to a set of property names by stripping "$.".
+  const allowedFields = new Set(
+    allowedPaths.map((path) => path.replace(/^\$\./, ""))
+  );
+
+  // Collect all flattened key paths from dataObj, respecting ignoredKeys.
+  // The flattenKeys function itself ensures that paths starting with an ignoredKey are not included.
+  let allFlattenedDataPaths = [];
+  if (Array.isArray(dataObj)) {
+    for (const obj of dataObj) {
+      allFlattenedDataPaths.push(...flattenKeys(obj, "", ignoredKeys));
+    }
+  } else {
+    allFlattenedDataPaths.push(...flattenKeys(dataObj, "", ignoredKeys));
+  }
+  const dataKeySet = new Set(allFlattenedDataPaths);
+
+  // Check that every discovered key path in dataObj is present in the allowedFields.
+  // This ensures that dataObj does not contain any fields/paths not specified in allowedPaths.
+  for (let key of dataKeySet) {
+    if (!allowedFields.has(key)) {
+      // Found a key path in dataObj that is not in the allowed list.
+      return false;
+    }
+  }
+
+  // If all key paths from dataKeySet were found in allowedFields,
+  // it means dataObj only contains fields permitted by allowedPaths.
+  return true;
+}
+
+/**
+ * Recursively flattens the keys of an object using dot notation.
+ * For example, { a: { b: 1 } } becomes ["a.b"].
+ *
+ * @param {Object} obj - The object to flatten.
+ * @param {string} [prefix=""] - The prefix used for recursion.
+ * @param {string[]} ignoredKeys - Keys to ignore (not flatten).
+ * @returns {string[]} - An array of flattened key paths.
+ */
+function flattenKeys(obj, prefix = "", ignoredKeys = []) {
+  let keys = [];
+
+  for (const [key, value] of Object.entries(obj)) {
+    if (ignoredKeys.includes(key)) continue;
+
+    const fullKey = prefix ? `${prefix}.${key}` : key;
+    if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+      // Recursively flatten nested objects.
+      keys.push(...flattenKeys(value, fullKey, ignoredKeys));
+    } else {
+      keys.push(fullKey);
+    }
+  }
+  return keys;
+}
+
+/*
+  fetch the requested disclosures from a presentationDefinintion
+*/
+export function getSDsFromPresentationDef(presentation_definition) {
+  return presentation_definition.input_descriptors.reduce((acc, descriptor) => {
+    if (
+      descriptor.constraints &&
+      Array.isArray(descriptor.constraints.fields)
+    ) {
+      descriptor.constraints.fields.forEach((field) => {
+        if (field.path) {
+          acc.push(...field.path);
+        }
+      });
+    }
+    return acc;
+  }, []);
+}
+
+
+/*
+ bufferToBits function loops over each byte in the Buffer and extracts the bits
+ using a bitwise right-shift and bitwise AND. Since the spec says bits are counted
+  from the least significant bit (LSB) to the most significant bit
+*/
+function bufferToBits(buffer) {
+  const bits = [];
+  for (let i = 0; i < buffer.length; i++) {
+    const byte = buffer[i];
+    for (let bit = 0; bit < 8; bit++) {
+      bits.push((byte >> bit) & 1);
+    }
+  }
+  return bits;
+}
+
+export function checkTokenStatus(decompressedBuffer, tokenIndex) {
+  const bits = bufferToBits(decompressedBuffer);
+  if (tokenIndex < 0 || tokenIndex >= bits.length) {
+    throw new Error(`Token index out of range. Received: index ${tokenIndex}, expected: index between 0 and ${bits.length - 1}`);
+  }
+  // In this example, 0 = valid, 1 = revoked.
+  return bits[tokenIndex] === 0 //? "valid" : "revoked";
+}
+
+
+export function buildVerifierAttestationJwt(va_jwt) {
+  return {
+    va_jwt: va_jwt
+  }
+}
