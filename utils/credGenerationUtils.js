@@ -142,6 +142,26 @@ try {
 }
 const defaultSigningKid = issuerConfigValues.default_signing_kid || "aegean#authentication-key";
 
+// Helper function to compute did:web identifier from serverURL
+function computeDidWebFromServerURL(serverURL) {
+  const proxyPath = process.env.PROXY_PATH || null;
+  let controller = serverURL;
+  if (proxyPath) {
+    controller = serverURL.replace("/" + proxyPath, "") + ":" + proxyPath;
+  }
+  controller = controller.replace("https://", "").replace("http://", "");
+  const did = `did:web:${controller}`;
+  return did;
+}
+
+// Helper function to compute did:jwk identifier from public key
+async function computeDidJwkFromPublic() {
+  const publicJwkForSigning = pemToJWK(publicKeyPem, "public");
+  const jwkStr = Buffer.from(JSON.stringify(publicJwkForSigning)).toString("base64url");
+  const did = `did:jwk:${jwkStr}`;
+  return did;
+}
+
 // const issuerConfig = require("../data/issuer-config.json");
 
 // Convert DER signature to IEEE P1363 format (raw r,s values) for COSE
@@ -334,6 +354,17 @@ export async function handleCredentialGenerationBasedOnFormat(
   const credType = vct;
   let credPayload = {};
 
+  // Determine issuer identifier based on signature type
+  // For did:web signature type, use did:web identifier
+  // For did:jwk signature type, use did:jwk identifier
+  // Otherwise use serverURL
+  let issuerIdentifier = serverURL;
+  if (effectiveSignatureType === "did:web") {
+    issuerIdentifier = computeDidWebFromServerURL(serverURL);
+  } else if (effectiveSignatureType === "did:jwk") {
+    issuerIdentifier = await computeDidJwkFromPublic();
+  }
+
   let issuerName = serverURL;
   const match = serverURL.match(/^(?:https?:\/\/)?([^/]+)/);
   if (match) {
@@ -406,38 +437,57 @@ export async function handleCredentialGenerationBasedOnFormat(
   const expiryDate = new Date(now);
   expiryDate.setMonth(now.getMonth() + 6);
 
-  if (format === "jwt_vc_json") {
-    console.log("Issuing a jwt_vc format credential");
-    const vcPayload = {
-      "@context": ["https://www.w3.org/2018/credentials/v1"],
-      type: ["VerifiableCredential", vct],
-      credentialSubject: credPayload.claims,
-      issuer: serverURL,
-      issuanceDate: now.toISOString(),
-      expirationDate: expiryDate.toISOString(),
-    };
+  if (format === "vc+sd-jwt") {
+    // W3C VCDM 2.0 secured with SD-JWT (VC-JOSE-COSE) — DIIP v5 compliant
+    console.log("Issuing a vc+sd-jwt format credential (W3C VCDM 2.0 + SD-JWT per VC-JOSE-COSE)");
+    const sdjwt = new SDJwtVcInstance({
+      signer,
+      verifier,
+      signAlg: "ES256",
+      hasher: digest,
+      hashAlg: "sha-256",
+      saltGenerator: generateSalt,
+    });
 
-    const jwtPayload = {
-      iss: serverURL,
-      iat: Math.floor(now.getTime() / 1000),
-      nbf: Math.floor(now.getTime() / 1000),
+    // Build W3C VCDM 2.0 payload structure secured with SD-JWT
+    const sdPayload = {
+      iss: issuerIdentifier,
+      iat: Math.floor(Date.now() / 1000),
+      nbf: Math.floor(Date.now() / 1000),
       exp: Math.floor(expiryDate.getTime() / 1000),
-      vc: vcPayload,
-      cnf: cnf,
+      vct: credType,
+      "@context": ["https://www.w3.org/ns/credentials/v2"],
+      type: ["VerifiableCredential", credType],
+      issuer: issuerIdentifier,
+      validFrom: now.toISOString(),
+      validUntil: expiryDate.toISOString(),
+      credentialSubject: credPayload.claims,
+      cnf,
     };
 
-    const privateKeyForSigning =
-      effectiveSignatureType === "x509" ? privateKeyPemX509 : privateKey;
+    // If a status list reference was attached upstream, embed it in the payload
+    if (requestBody.status_reference) {
+      sdPayload.status = requestBody.status_reference;
+    }
 
-    const signOptions = {
-      algorithm: "ES256",
-      ...headerOptions,
+    // For VCDM 2.0 + SD-JWT, selective disclosure applies to claims within credentialSubject
+    const vcdmDisclosureFrame = {
+      credentialSubject: credPayload.disclosureFrame,
     };
 
-    const credential = jwt.sign(jwtPayload, privateKeyForSigning, signOptions);
+    const vcSdJwtHeader = {
+      header: { ...headerOptions.header, cty: "vc" },
+    };
+    const credential = await sdjwt.issue(
+      sdPayload,
+      vcdmDisclosureFrame,
+      vcSdJwtHeader
+    );
+    console.log("Credential issued (vc+sd-jwt VCDM 2.0): ", credential);
     return credential;
-  } else if (format === "dc+sd-jwt" || format === "vc+sd-jwt") {
-    console.log(`Issuing a ${format} format credential`);
+  } else if (format === "dc+sd-jwt") {
+    // SD-JWT VC (flat claims) — DIIP v5 compliant
+    console.log("Issuing a dc+sd-jwt format credential (SD-JWT VC)");
     const sdjwt = new SDJwtVcInstance({
       signer,
       verifier,
@@ -448,7 +498,7 @@ export async function handleCredentialGenerationBasedOnFormat(
     });
 
     const sdPayload = {
-      iss: serverURL,
+      iss: issuerIdentifier,
       iat: Math.floor(Date.now() / 1000),
       nbf: Math.floor(Date.now() / 1000),
       exp: Math.floor(expiryDate.getTime() / 1000),
@@ -467,7 +517,40 @@ export async function handleCredentialGenerationBasedOnFormat(
       credPayload.disclosureFrame,
       headerOptions
     );
-    console.log("Credential issued: ", credential);
+    console.log("Credential issued (dc+sd-jwt): ", credential);
+    return credential;
+  } else if (format === "jwt_vc_json") {
+    // Legacy jwt_vc_json format — kept for backward compatibility but NOT DIIP v5 compliant
+    // DIIP v5 requires SD-JWT for securing W3C VCDM credentials (use vc+sd-jwt instead)
+    console.warn("WARNING: jwt_vc_json format is not DIIP v5 compliant. Use vc+sd-jwt for W3C VCDM credentials.");
+    console.log("Issuing a jwt_vc_json format credential (legacy)");
+    const vcPayload = {
+      "@context": ["https://www.w3.org/ns/credentials/v2"],
+      type: ["VerifiableCredential", vct],
+      credentialSubject: credPayload.claims,
+      issuer: issuerIdentifier,
+      validFrom: now.toISOString(),
+      validUntil: expiryDate.toISOString(),
+    };
+
+    const jwtPayload = {
+      iss: issuerIdentifier,
+      iat: Math.floor(now.getTime() / 1000),
+      nbf: Math.floor(now.getTime() / 1000),
+      exp: Math.floor(expiryDate.getTime() / 1000),
+      vc: vcPayload,
+      cnf: cnf,
+    };
+
+    const privateKeyForSigning =
+      effectiveSignatureType === "x509" ? privateKeyPemX509 : privateKey;
+
+    const signOptions = {
+      algorithm: "ES256",
+      ...headerOptions,
+    };
+
+    const credential = jwt.sign(jwtPayload, privateKeyForSigning, signOptions);
     return credential;
   } else if (format === "mDL" || format === "mdl") {
     console.log("Generating mDL credential using @auth0/mdl library...");
@@ -1022,6 +1105,22 @@ export async function handleCredentialGenerationBasedOnFormatDeferred(sessionObj
   const credType = vct;
   let credPayload = {};
 
+  // Determine effective signature type (same logic as main function)
+  const effectiveSignatureType = sessionObject.isHaip && process.env.ISSUER_SIGNATURE_TYPE === "x509"
+    ? "x509"
+    : (sessionObject.signatureType || "kid-jwk");
+
+  // Determine issuer identifier based on signature type
+  // For did:web signature type, use did:web identifier
+  // For did:jwk signature type, use did:jwk identifier
+  // Otherwise use serverURL
+  let issuerIdentifier = serverURL;
+  if (effectiveSignatureType === "did:web") {
+    issuerIdentifier = computeDidWebFromServerURL(serverURL);
+  } else if (effectiveSignatureType === "did:jwk") {
+    issuerIdentifier = await computeDidJwkFromPublic();
+  }
+
   let issuerName = serverURL;
   const match = serverURL.match(/^(?:https?:\/\/)?([^/]+)/);
   if (match) {
@@ -1096,7 +1195,7 @@ export async function handleCredentialGenerationBasedOnFormatDeferred(sessionObj
   // Issue credential
   const credential = await sdjwt.issue(
     {
-      iss: serverURL,
+      iss: issuerIdentifier,
       iat: Math.floor(Date.now() / 1000),
       nbf: Math.floor(Date.now() / 1000),
       exp: Math.floor(expiryDate.getTime() / 1000),

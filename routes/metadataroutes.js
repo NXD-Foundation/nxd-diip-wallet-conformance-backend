@@ -63,20 +63,28 @@ metadataRouter.get(
 
 /**
  * Authorization Server Metadata
+ * For path-based issuers (RFC 8414): /.well-known/oauth-authorization-server/{path}
  */
 metadataRouter.get(
   [
     "/.well-known/oauth-authorization-server",
+    "/.well-known/oauth-authorization-server/:suffix(*)",
     "/.well-known/openid-configuration",
     "/.well-known/openid-configuration/:suffix(*)",
     "/oauth-authorization-server/rfc-issuer", //this is required in case the issuer is behind a reverse proxy: see https://www.rfc-editor.org/rfc/rfc8414.html
   ],
   async (req, res) => {
-    oauthConfig.issuer = serverURL;
-    oauthConfig.authorization_endpoint = serverURL + "/authorize";
-    oauthConfig.pushed_authorization_request_endpoint = serverURL + "/par";
-    oauthConfig.token_endpoint = serverURL + "/token_endpoint";
-    oauthConfig.jwks_uri = serverURL + "/jwks";
+    const rawSuffix = req.params?.suffix || "";
+    const normalizedSuffix = rawSuffix.replace(/^\/+/, "");
+
+    // If the suffix matches PROXY_PATH, don't add it again since SERVER_URL already includes it
+    const issuerBase = (normalizedSuffix && normalizedSuffix !== PROXY_PATH) ? `${serverURL}/${normalizedSuffix}` : serverURL;
+
+    oauthConfig.issuer = issuerBase;
+    oauthConfig.authorization_endpoint = issuerBase + "/authorize";
+    oauthConfig.pushed_authorization_request_endpoint = issuerBase + "/par";
+    oauthConfig.token_endpoint = issuerBase + "/token_endpoint";
+    oauthConfig.jwks_uri = issuerBase + "/jwks";
     res.type("application/json").send(oauthConfig);
   }
 );

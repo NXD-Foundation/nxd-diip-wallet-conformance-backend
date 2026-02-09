@@ -1,9 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<scriptlet id="authenticateUser" xmlns="http://www.gitb.com/tdl/v1/">
+<scriptlet id="issueUsers" xmlns="http://www.gitb.com/tdl/v1/">
     <!-- The "params" block defined the scriptlet's inputs. Parameters without default values are mandatory. -->
     <params>
         <var name="credentialType" type="string"></var>
-        <var name="expectSuccess" type="string"><value>true</value></var>
+        <var name="expectSuccess" type="string">
+            <value>true</value>
+        </var>
     </params>
     <steps>
         <!--
@@ -12,8 +14,8 @@
             Besides DOMAIN you can also refer to custom properties at organisation, system or statement level (we didn't
             have such a need in these tests).
         -->
-        <assign to="getCredentialRequestEndpoint">$DOMAIN{issuerServiceRFC} || "/did/generateVPRequestGET"</assign>
-        <assign to="getValidationResponseEndpoint">$DOMAIN{issuerServiceRFC} || "/verificationStatus"</assign>
+        <assign to="credentialIssuanceEndpoint">$DOMAIN{diipv5} || "/offer-code-sd-jwt"</assign>
+        <assign to="getPIDIssuanceStatus">$DOMAIN{diipv5} || "/issueStatus"</assign>
         <!-- 
             Example of using an embedded process handler (a built-in capability) to generate a UUID.
          -->
@@ -21,24 +23,27 @@
         <!--
             The "group" step adds a nice visual distinction in the diagram over related sets of steps.
         -->
-        <group id="step1" title="Step 1" desc="Request validation">
+        <group id="step1" title="Step 1" desc="Request Issuance">
             <!--
                 See here how we use the "log" step to add information in the test session log. You can also add information
                 from supporting test services (e.g. a messaging service)
             -->
-            <log>"Requesting validation of session ID [" || $validationSessionId || "] from endpoint [" || $getCredentialRequestEndpoint || "]."</log>
+            <log>"Requesting issuance with session ID [" || $validationSessionId || "] from endpoint [" ||
+                $credentialIssuanceEndpoint || "]."
+            </log>
             <!--
                 The "send" step calls the messaging service and expects a synchronous response. In this case we will end up doing a
                 getCredentialRequest call based on the inputs we are supplying. See here how we refer to the address of the service 
                 via the DOMAIN's configuration.
             -->
-            <send id="getCredentialRequest" desc="Request credential validation" from="User" to="Verifier" handler="$DOMAIN{messagingServiceAddress}">
-                <input name="endpoint">$getCredentialRequestEndpoint</input>
-                <input name="credentialFormat">"vc+sd-jwt"</input>
-                <input name="credentialType">""</input>
+            <send id="issuePIDRequest" desc="Request credential issuance" from="User" to="Issuer"
+                  handler="$DOMAIN{messagingServiceAddress}">
+                <input name="type">"rfc-issue"</input>
+                <input name="endpoint">$credentialIssuanceEndpoint</input>
+                <input name="credentialType">$credentialType</input>
                 <input name="sessionId">$validationSessionId</input>
-                <input name="response_mode">"direct_post.jwt"</input>
-                <input name="type">"rfc-verifier-diip"</input>
+                <input name="signatureType">"jwk"</input>
+                <input name="clientIdScheme">"x509_san_dns"</input>
             </send>
             <!--
                 The "verify" step is the primary means of making assertions. You can also have the messaging steps fail and produce reports
@@ -49,11 +54,11 @@
                 "send" step.
             -->
             <verify handler="StringValidator" desc="Check status code">
-                <input name="actualstring">$getCredentialRequest{response}{status}</input>
+                <input name="actualstring">$issuePIDRequest{response}{status}</input>
                 <input name="expectedstring">"200"</input>
             </verify>
             <verify handler="ExpressionValidator" desc="Check non-empty QR code">
-                <input name="expression">$getCredentialRequest{response}{qrCode} != ''</input>
+                <input name="expression">$issuePIDRequest{response}{qrCode} != ''</input>
             </verify>
             <!--
                 The "interact" step creates a user prompt. Here we only show the QR code but we could also show other information
@@ -64,8 +69,12 @@
                 so we will see a popup displaying the image.
             -->
             <interact hidden="true" inputTitle="Scan QR code">
-                <instruct name="qrCode" desc="Credential QR code" mimeType="$getCredentialRequest{response}{qrCodeType}">$getCredentialRequest{response}{qrCode}</instruct>
-                <instruct name="qrCodeText" desc="VP request" mimeType="text/plain">$getCredentialRequest{response}{vpCode}</instruct>
+                <instruct name="qrCode" desc="Credential QR code" mimeType="$issuePIDRequest{response}{qrCodeType}">
+                    $issuePIDRequest{response}{qrCode}
+                </instruct>
+                <instruct name="qrCodeText" desc="VCI request" mimeType="text/plain">
+                    $issuePIDRequest{response}{vpCode}
+                </instruct>
             </interact>
         </group>
         <group id="step2" title="Step 2" desc="Check response">
@@ -77,8 +86,10 @@
                 The messaging service is implemented to poll the verifier service until we get a non-pending response.
                 Notice also how we set a "timeout" here so that the test session will stop waiting after a (configurable) threshold.
             -->
-            <receive id="getValidationResponse" desc="Get the validation response" from="Verifier" to="User" handler="$DOMAIN{messagingServiceAddress}" timeout="$DOMAIN{validationResponseTimeout}" timeoutIsError="true">
-                <input name="endpoint">$getValidationResponseEndpoint</input>
+            <receive id="getValidationResponse" desc="Get the validation response" from="Issuer" to="User"
+                     handler="$DOMAIN{messagingServiceAddress}" timeout="$DOMAIN{validationResponseTimeout}"
+                     timeoutIsError="true">
+                <input name="endpoint">$getPIDIssuanceStatus</input>
                 <input name="sessionId">$validationSessionId</input>
             </receive>
             <!--

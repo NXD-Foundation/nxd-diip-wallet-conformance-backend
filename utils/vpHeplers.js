@@ -3,7 +3,34 @@ const SPEC_REFS = {
   VP_1_0: "https://openid.net/specs/openid-4-verifiable-presentations-1_0.html",
   VP_CREDENTIAL_RESPONSE: "https://openid.net/specs/openid-4-verifiable-presentations-1_0.html#name-credential-response",
   VP_PRESENTATION_SUBMISSION: "https://openid.net/specs/openid-4-verifiable-presentations-1_0.html#name-presentation-submission",
+  VC_JOSE_COSE_3_2_2: "https://www.w3.org/TR/vc-jose-cose/#secure-with-sd-jwt",
 };
+
+/**
+ * VC-JOSE-COSE 3.2.2: For vp+sd-jwt, typ SHOULD be "vp+sd-jwt" and cty SHOULD be "vp".
+ * Logs a warning if the decoded SD-JWT looks like a VP but headers don't match.
+ * @param {{ jwt?: { header?: Record<string, unknown>, payload?: Record<string, unknown> } }} decodedSdJwt - Result of decodeSdJwt
+ * @param {string} [context] - Optional context (e.g. descriptor id) for logs
+ */
+function checkVpSdJwtHeaders(decodedSdJwt, context = "") {
+  const header = decodedSdJwt?.jwt?.header;
+  const payload = decodedSdJwt?.jwt?.payload;
+  if (!header || !payload) return;
+  const typeVal = payload.type;
+  const typeMatches = (t) => t === "VerifiablePresentation" || t === "EnvelopedVerifiablePresentation";
+  const looksLikeVp = Array.isArray(payload.verifiableCredential) ||
+    typeMatches(typeVal) ||
+    (Array.isArray(typeVal) && typeVal.some(typeMatches));
+  if (!looksLikeVp) return;
+  const typ = header.typ;
+  const cty = header.cty;
+  if (typ !== "vp+sd-jwt") {
+    console.warn(`[VC-JOSE-COSE 3.2.2] SD-JWT presentation has typ="${typ}"; spec recommends "vp+sd-jwt". See ${SPEC_REFS.VC_JOSE_COSE_3_2_2}. ${context}`);
+  }
+  if (cty !== undefined && cty !== "vp") {
+    console.warn(`[VC-JOSE-COSE 3.2.2] SD-JWT presentation has cty="${cty}"; spec recommends "vp". See ${SPEC_REFS.VC_JOSE_COSE_3_2_2}. ${context}`);
+  }
+}
 
 import jp from "jsonpath";
 import jwt from "jsonwebtoken";
@@ -135,6 +162,7 @@ export async function extractClaimsFromRequest(req, digest, isPaymentVP, session
             descriptor.format === "jwt_vp"
           ) {
             const decodedSdJwt = await decodeSdJwt(credString, digest);
+            checkVpSdJwtHeaders(decodedSdJwt, `descriptor id '${descriptor.id}'`);
             if (decodedSdJwt.kbJwt) {
                 keybindJwt = decodedSdJwt.kbJwt
             }
@@ -280,6 +308,7 @@ export async function extractClaimsFromRequest(req, digest, isPaymentVP, session
           if (token.includes("~")) { // Heuristic for SD-JWT
             console.log(`[DEBUG extractClaimsFromRequest] Processing SD-JWT token, length: ${token.length}, tildes: ${(token.match(/~/g) || []).length}`);
             const decodedSdJwt = await decodeSdJwt(token, digest);
+            checkVpSdJwtHeaders(decodedSdJwt, "non-PEX flow");
             console.log(`[DEBUG extractClaimsFromRequest] decodeSdJwt result:`, {
               hasKbJwt: !!decodedSdJwt.kbJwt,
               kbJwtType: typeof decodedSdJwt.kbJwt,

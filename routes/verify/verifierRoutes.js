@@ -54,7 +54,18 @@ const SPEC_REFS = {
   VP_CREDENTIAL_RESPONSE: "https://openid.net/specs/openid-4-verifiable-presentations-1_0.html#name-credential-response",
   VP_NONCE: "https://openid.net/specs/openid-4-verifiable-presentations-1_0.html#name-nonce",
   VP_STATE: "https://openid.net/specs/openid-4-verifiable-presentations-1_0.html#name-state",
+  // VC-JOSE-COSE 3.2.2: Securing JSON-LD Verifiable Presentations with SD-JWT
+  VC_JOSE_COSE_SD_JWT: "https://www.w3.org/TR/vc-jose-cose/#secure-with-sd-jwt",
 };
+
+// VC-JOSE-COSE 3.2.2 (vp+sd-jwt) compliance note (see SPEC_REFS.VC_JOSE_COSE_SD_JWT):
+// - Verification: Currently the verifier uses decode-only (decodeSdJwt + getClaims). The spec requires
+//   conforming verifiers to *verify* SD-JWT (signature, disclosures). Full compliance would use
+//   SDJwtVcInstance.verify() with a verifier that resolves issuer keys (e.g. from iss/kid).
+// - Headers: typ SHOULD be "vp+sd-jwt", cty SHOULD be "vp" for presentations. Optional checks can be
+//   added when decoding; see vpHeplers.js for typ/cty validation on decoded SD-JWT.
+// - Enveloped types: Credentials in VPs MUST use EnvelopedVerifiableCredential; VPs in VPs MUST use
+//   EnvelopedVerifiablePresentation. Structure is handled; explicit type validation is optional.
 
 const verifierRouter = express.Router();
 
@@ -243,6 +254,129 @@ verifierRouter.post("/direct_post/:id", async (req, res) => {
       vpTokenType: typeof vpToken,
       dcqlCredentialsCount: vpSession.dcql_query?.credentials?.length || 0
     });
+
+    // Validate vp_token format when DCQL is used
+    // Per OpenID4VP 1.0 Section 8.1: When DCQL is used, vp_token MUST be a JSON object
+    // mapping credential query IDs to presentations, not a bare string
+    const hasDcqlQuery = vpSession.dcql_query && 
+                         Array.isArray(vpSession.dcql_query.credentials) && 
+                         vpSession.dcql_query.credentials.length > 0;
+    
+    if (hasDcqlQuery && vpToken !== undefined) {
+      let vpTokenToValidate = vpToken;
+      
+      // Handle case where vp_token might be a JSON string that needs parsing
+      if (typeof vpToken === 'string') {
+        // Check if it's a JSON string (starts with {)
+        if (vpToken.trim().startsWith('{')) {
+          try {
+            vpTokenToValidate = JSON.parse(vpToken);
+            await logDebug(sessionId, "Parsed vp_token from JSON string for DCQL validation", {
+              parsedType: typeof vpTokenToValidate,
+              isObject: typeof vpTokenToValidate === 'object' && vpTokenToValidate !== null && !Array.isArray(vpTokenToValidate)
+            });
+          } catch (e) {
+            // Not valid JSON, will be caught by validation below
+            await logDebug(sessionId, "Failed to parse vp_token JSON string", {
+              error: e.message
+            });
+          }
+        } else {
+          // It's a bare string, which is invalid for DCQL
+          const specRef = "https://openid.net/specs/openid-4-verifiable-presentations-1_0.html#name-response-parameters";
+          await logError(sessionId, "Invalid vp_token format for DCQL query", {
+            received: `vp_token is a string (${vpToken.substring(0, 50)}...)`,
+            expected: "vp_token must be a JSON object mapping credential query IDs to presentations when DCQL is used",
+            specRef,
+            dcqlCredentialIds: vpSession.dcql_query.credentials.map(c => c.id).filter(Boolean)
+          });
+          
+          // Mark session as failed
+          try {
+            vpSession.status = "failed";
+            vpSession.error = "invalid_request";
+            vpSession.error_description = `Invalid vp_token format for DCQL query. When DCQL is used, vp_token MUST be a JSON object mapping credential query IDs to presentations, not a bare string. See ${specRef}`;
+            await storeVPSession(sessionId, vpSession);
+          } catch (storageError) {
+            await logError(sessionId, "Failed to update session status after vp_token format validation error", {
+              error: storageError.message,
+              stack: storageError.stack
+            }).catch(() => {});
+          }
+          
+          return res.status(400).json({ 
+            error: "invalid_request",
+            error_description: `Invalid vp_token format for DCQL query. When DCQL is used, vp_token MUST be a JSON object mapping credential query IDs to presentations, not a bare string. See ${specRef}`
+          });
+        }
+      }
+      
+      // Validate that vp_token is an object (not string, not array, not null)
+      if (typeof vpTokenToValidate !== 'object' || vpTokenToValidate === null || Array.isArray(vpTokenToValidate)) {
+        const specRef = "https://openid.net/specs/openid-4-verifiable-presentations-1_0.html#name-response-parameters";
+        const received = typeof vpTokenToValidate === 'object' && Array.isArray(vpTokenToValidate) 
+          ? "vp_token is an array" 
+          : typeof vpTokenToValidate === 'object' && vpTokenToValidate === null
+          ? "vp_token is null"
+          : `vp_token is ${typeof vpTokenToValidate}`;
+        
+        await logError(sessionId, "Invalid vp_token format for DCQL query", {
+          received,
+          expected: "vp_token must be a JSON object mapping credential query IDs to presentations when DCQL is used",
+          specRef,
+          dcqlCredentialIds: vpSession.dcql_query.credentials.map(c => c.id).filter(Boolean)
+        });
+        
+        // Mark session as failed
+        try {
+          vpSession.status = "failed";
+          vpSession.error = "invalid_request";
+          vpSession.error_description = `Invalid vp_token format for DCQL query. When DCQL is used, vp_token MUST be a JSON object mapping credential query IDs to presentations. Received: ${received}. See ${specRef}`;
+          await storeVPSession(sessionId, vpSession);
+        } catch (storageError) {
+          await logError(sessionId, "Failed to update session status after vp_token format validation error", {
+            error: storageError.message,
+            stack: storageError.stack
+          }).catch(() => {});
+        }
+        
+        return res.status(400).json({ 
+          error: "invalid_request",
+          error_description: `Invalid vp_token format for DCQL query. When DCQL is used, vp_token MUST be a JSON object mapping credential query IDs to presentations. Received: ${received}. See ${specRef}`
+        });
+      }
+      
+      // Additional validation: check that the object keys match credential query IDs
+      const expectedCredentialIds = vpSession.dcql_query.credentials
+        .map(c => c.id)
+        .filter(id => typeof id === 'string' && id.length > 0);
+      
+      if (expectedCredentialIds.length > 0) {
+        const receivedKeys = Object.keys(vpTokenToValidate);
+        const missingIds = expectedCredentialIds.filter(id => !receivedKeys.includes(id));
+        
+        if (missingIds.length > 0) {
+          await logWarn(sessionId, "vp_token object missing some credential query IDs", {
+            expectedCredentialIds,
+            receivedKeys,
+            missingIds,
+            specRef: "https://openid.net/specs/openid-4-verifiable-presentations-1_0.html#name-response-parameters"
+          });
+          // Note: This is a warning, not an error, as the spec allows returning only matching credentials
+        }
+        
+        await logDebug(sessionId, "DCQL vp_token format validation passed", {
+          expectedCredentialIds,
+          receivedKeys,
+          vpTokenValueTypes: Object.fromEntries(
+            Object.entries(vpTokenToValidate).map(([k, v]) => [
+              k, 
+              Array.isArray(v) ? `array[${v.length}]` : typeof v
+            ])
+          )
+        });
+      }
+    }
 
     if (isMdoc) {
       await logInfo(sessionId, "Processing mDL verification using custom cbor-x decoder", {
@@ -687,6 +821,34 @@ verifierRouter.post("/direct_post/:id", async (req, res) => {
               console.log(`No VP token in decrypted JWT response. Received: ${received}, expected: vp_token string in JWT payload`);
               return res.status(400).json({ error: `No VP token in decrypted JWT response. Received: ${received}, expected: vp_token string in JWT payload` });
             }
+            
+            // Validate vp_token format when DCQL is used (for direct_post.jwt with JWE)
+            const hasDcqlQuery = vpSession.dcql_query && 
+                                 Array.isArray(vpSession.dcql_query.credentials) && 
+                                 vpSession.dcql_query.credentials.length > 0;
+            if (hasDcqlQuery) {
+              if (typeof vpToken !== 'object' || vpToken === null || Array.isArray(vpToken)) {
+                const specRef = "https://openid.net/specs/openid-4-verifiable-presentations-1_0.html#name-response-parameters";
+                const received = typeof vpToken === 'object' && Array.isArray(vpToken) 
+                  ? "vp_token is an array" 
+                  : typeof vpToken === 'object' && vpToken === null
+                  ? "vp_token is null"
+                  : `vp_token is ${typeof vpToken}`;
+                
+                await logError(sessionId, "Invalid vp_token format for DCQL query in direct_post.jwt JWE", {
+                  received,
+                  expected: "vp_token must be a JSON object mapping credential query IDs to presentations when DCQL is used",
+                  specRef,
+                  dcqlCredentialIds: vpSession.dcql_query.credentials.map(c => c.id).filter(Boolean)
+                });
+                
+                return res.status(400).json({ 
+                  error: "invalid_request",
+                  error_description: `Invalid vp_token format for DCQL query. When DCQL is used, vp_token MUST be a JSON object mapping credential query IDs to presentations. Received: ${received}. See ${specRef}`
+                });
+              }
+            }
+            
             if (typeof vpToken === 'string') {
               primaryVpJwt = vpToken;
             }
@@ -716,6 +878,33 @@ verifierRouter.post("/direct_post/:id", async (req, res) => {
                   error: parseError.message
                 });
                 // Keep as string, maybe it's actually an SD-JWT
+              }
+            }
+            
+            // Validate vp_token format when DCQL is used (for direct_post.jwt with JWE payload object)
+            const hasDcqlQuery = vpSession.dcql_query && 
+                                 Array.isArray(vpSession.dcql_query.credentials) && 
+                                 vpSession.dcql_query.credentials.length > 0;
+            if (hasDcqlQuery) {
+              if (typeof vpToken !== 'object' || vpToken === null || Array.isArray(vpToken)) {
+                const specRef = "https://openid.net/specs/openid-4-verifiable-presentations-1_0.html#name-response-parameters";
+                const received = typeof vpToken === 'object' && Array.isArray(vpToken) 
+                  ? "vp_token is an array" 
+                  : typeof vpToken === 'object' && vpToken === null
+                  ? "vp_token is null"
+                  : `vp_token is ${typeof vpToken}`;
+                
+                await logError(sessionId, "Invalid vp_token format for DCQL query in direct_post.jwt JWE payload", {
+                  received,
+                  expected: "vp_token must be a JSON object mapping credential query IDs to presentations when DCQL is used",
+                  specRef,
+                  dcqlCredentialIds: vpSession.dcql_query.credentials.map(c => c.id).filter(Boolean)
+                });
+                
+                return res.status(400).json({ 
+                  error: "invalid_request",
+                  error_description: `Invalid vp_token format for DCQL query. When DCQL is used, vp_token MUST be a JSON object mapping credential query IDs to presentations. Received: ${received}. See ${specRef}`
+                });
               }
             }
             // await logDebug(sessionId, "vp_token object received", {

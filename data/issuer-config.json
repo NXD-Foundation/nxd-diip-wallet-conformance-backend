@@ -125,7 +125,7 @@
       "credential_metadata": {
         "display": [
           {
-            "name": "Verifiable ID Card (jwt_vc)",
+            "name": "Verifiable ID Card (VCDM 2.0)",
             "locale": "en-GB",
             "background_color": "#12107c",
             "text_color": "#FFFFFF",
@@ -211,14 +211,15 @@
         ]
       },
       "credential_signing_alg_values_supported": ["ES256"],
-      "format": "jwt_vc_json",
+      "format": "vc+sd-jwt",
+      "vct": "VerifiableIdCardJwtVc",
       "proof_types_supported": {
         "jwt": {
           "proof_signing_alg_values_supported": ["ES256"]
         }
       },
       "credential_definition": {
-      "type": [
+        "type": [
           "VerifiableCredential",
           "VerifiableIdCard"
         ]

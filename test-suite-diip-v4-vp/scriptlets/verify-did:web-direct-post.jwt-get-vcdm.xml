@@ -34,7 +34,7 @@
             -->
             <send id="getCredentialRequest" desc="Request credential validation" from="User" to="Verifier" handler="$DOMAIN{messagingServiceAddress}">
                 <input name="endpoint">$getCredentialRequestEndpoint</input>
-                <input name="credentialFormat">"jwt_vc_json"</input>
+                <input name="credentialFormat">"vc+sd-jwt"</input>
                 <input name="credentialType">""</input>
                 <input name="sessionId">$validationSessionId</input>
                 <input name="response_mode">"direct_post.jwt"</input>

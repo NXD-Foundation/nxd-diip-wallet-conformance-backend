@@ -3,7 +3,9 @@
     <!-- The "params" block defined the scriptlet's inputs. Parameters without default values are mandatory. -->
     <params>
         <var name="credentialType" type="string"></var>
-        <var name="expectSuccess" type="string"><value>true</value></var>
+        <var name="expectSuccess" type="string">
+            <value>true</value>
+        </var>
     </params>
     <steps>
         <!--
@@ -12,8 +14,8 @@
             Besides DOMAIN you can also refer to custom properties at organisation, system or statement level (we didn't
             have such a need in these tests).
         -->
-        <assign to="getCredentialRequestEndpoint">$DOMAIN{issuerServiceRFC} || "/did/generateVPRequestGET"</assign>
-        <assign to="getValidationResponseEndpoint">$DOMAIN{issuerServiceRFC} || "/verificationStatus"</assign>
+        <assign to="getCredentialRequestEndpoint">$DOMAIN{diipv5} || "/x509/generateVPRequestTransaction"</assign>
+        <assign to="getValidationResponseEndpoint">$DOMAIN{diipv5} || "/verificationStatus"</assign>
         <!-- 
             Example of using an embedded process handler (a built-in capability) to generate a UUID.
          -->
@@ -26,19 +28,21 @@
                 See here how we use the "log" step to add information in the test session log. You can also add information
                 from supporting test services (e.g. a messaging service)
             -->
-            <log>"Requesting validation of session ID [" || $validationSessionId || "] from endpoint [" || $getCredentialRequestEndpoint || "]."</log>
+            <log>"Requesting validation of session ID [" || $validationSessionId || "] from endpoint [" ||
+                $getCredentialRequestEndpoint || "]."
+            </log>
             <!--
                 The "send" step calls the messaging service and expects a synchronous response. In this case we will end up doing a
                 getCredentialRequest call based on the inputs we are supplying. See here how we refer to the address of the service 
                 via the DOMAIN's configuration.
             -->
-            <send id="getCredentialRequest" desc="Request credential validation" from="User" to="Verifier" handler="$DOMAIN{messagingServiceAddress}">
+            <send id="getCredentialRequest" desc="Request credential validation" from="User" to="Verifier"
+                  handler="$DOMAIN{messagingServiceAddress}">
                 <input name="endpoint">$getCredentialRequestEndpoint</input>
-                <input name="credentialFormat">"vc+sd-jwt"</input>
-                <input name="credentialType">""</input>
+                <input name="credentialType">$credentialType</input>
                 <input name="sessionId">$validationSessionId</input>
                 <input name="response_mode">"direct_post.jwt"</input>
-                <input name="type">"rfc-verifier-diip"</input>
+                <input name="type">"rfc-verifier"</input>
             </send>
             <!--
                 The "verify" step is the primary means of making assertions. You can also have the messaging steps fail and produce reports
@@ -64,8 +68,12 @@
                 so we will see a popup displaying the image.
             -->
             <interact hidden="true" inputTitle="Scan QR code">
-                <instruct name="qrCode" desc="Credential QR code" mimeType="$getCredentialRequest{response}{qrCodeType}">$getCredentialRequest{response}{qrCode}</instruct>
-                <instruct name="qrCodeText" desc="VP request" mimeType="text/plain">$getCredentialRequest{response}{vpCode}</instruct>
+                <instruct name="qrCode" desc="Credential QR code"
+                          mimeType="$getCredentialRequest{response}{qrCodeType}">$getCredentialRequest{response}{qrCode}
+                </instruct>
+                <instruct name="qrCodeText" desc="VP request" mimeType="text/plain">
+                    $getCredentialRequest{response}{vpCode}
+                </instruct>
             </interact>
         </group>
         <group id="step2" title="Step 2" desc="Check response">
@@ -77,7 +85,9 @@
                 The messaging service is implemented to poll the verifier service until we get a non-pending response.
                 Notice also how we set a "timeout" here so that the test session will stop waiting after a (configurable) threshold.
             -->
-            <receive id="getValidationResponse" desc="Get the validation response" from="Verifier" to="User" handler="$DOMAIN{messagingServiceAddress}" timeout="$DOMAIN{validationResponseTimeout}" timeoutIsError="true">
+            <receive id="getValidationResponse" desc="Get the validation response" from="Verifier" to="User"
+                     handler="$DOMAIN{messagingServiceAddress}" timeout="$DOMAIN{validationResponseTimeout}"
+                     timeoutIsError="true">
                 <input name="endpoint">$getValidationResponseEndpoint</input>
                 <input name="sessionId">$validationSessionId</input>
             </receive>
