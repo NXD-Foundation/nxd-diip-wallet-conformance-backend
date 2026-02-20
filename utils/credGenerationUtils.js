@@ -10,6 +10,9 @@ import { pemToJWK, generateNonce, didKeyToJwks } from "../utils/cryptoUtils.js";
 import fs from "fs";
 import { SDJwtVcInstance } from "@sd-jwt/sd-jwt-vc";
 
+/** DIIP v5: JWT typ header for SD-JWT credentials (OID4VCI format identifier dc+sd-jwt). */
+const SDJWT_CREDENTIAL_TYP_HEADER = "dc+sd-jwt";
+
 // Standardize on 'cbor' library for EUDI Wallet compliance (matches ISO 18013-5 spec)
 // Note: cbor-x is faster but cbor library matches the spec and reference implementations
 import cbor from 'cbor';
@@ -476,14 +479,14 @@ export async function handleCredentialGenerationBasedOnFormat(
     };
 
     const vcSdJwtHeader = {
-      header: { ...headerOptions.header, cty: "vc" },
+      header: { ...headerOptions.header, typ: SDJWT_CREDENTIAL_TYP_HEADER, cty: "vc" },
     };
     const credential = await sdjwt.issue(
       sdPayload,
       vcdmDisclosureFrame,
       vcSdJwtHeader
     );
-    console.log("Credential issued (vc+sd-jwt VCDM 2.0): ", credential);
+    console.log("Credential issued (vc+sd-jwt VCDM 2.0, typ=dc+sd-jwt): ", credential);
     return credential;
   } else if (format === "dc+sd-jwt") {
     // SD-JWT VC (flat claims) — DIIP v5 compliant
@@ -512,10 +515,13 @@ export async function handleCredentialGenerationBasedOnFormat(
       sdPayload.status = requestBody.status_reference;
     }
 
+    const dcSdJwtHeader = {
+      header: { ...headerOptions.header, typ: SDJWT_CREDENTIAL_TYP_HEADER },
+    };
     const credential = await sdjwt.issue(
       sdPayload,
       credPayload.disclosureFrame,
-      headerOptions
+      dcSdJwtHeader
     );
     console.log("Credential issued (dc+sd-jwt): ", credential);
     return credential;
@@ -1176,15 +1182,17 @@ export async function handleCredentialGenerationBasedOnFormatDeferred(sessionObj
     cnf = { jwk: await didKeyToJwks(holderJWKS.kid) };
   }
 
-  // Prepare issuance headers
+  // Prepare issuance headers (DIIP v5: typ MUST be dc+sd-jwt for SD-JWT credentials)
   const headerOptions = isHaip
     ? {
         header: {
+          typ: SDJWT_CREDENTIAL_TYP_HEADER,
           x5c: [pemToBase64Der(certificatePemX509)],
         },
       }
     : {
         header: {
+          typ: SDJWT_CREDENTIAL_TYP_HEADER,
           kid: "aegean#authentication-key",
         },
       };
