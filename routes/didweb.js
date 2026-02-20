@@ -7,6 +7,31 @@ const didWebRouter = express.Router();
 const serverURL = process.env.SERVER_URL || "http://localhost:3000";
 const proxyPath = process.env.PROXY_PATH || null;
 
+// Helper function to build DID document
+function buildDidDocument(controller, serviceURL, jwks) {
+  return {
+    "@context": "https://www.w3.org/ns/did/v1",
+    id: `did:web:${controller}`,
+    verificationMethod: [
+      {
+        id: `did:web:${controller}#keys-1`, //"did:web:example.com#keys-1",
+        type: "JsonWebKey2020",
+        controller: `${controller}`,
+        publicKeyJwk: jwks,
+      },
+    ],
+    authentication: [`${controller}#keys-1`],
+    assertionMethod: [`${controller}#keys-1`], // Required for credential signing
+    service: [
+      {
+        id: `did:web:${controller}#jwks`,
+        type: "JsonWebKey2020",
+        serviceEndpoint: `${serviceURL}/.well-known/jwks.json`,
+      },
+    ],
+  };
+}
+
 didWebRouter.get(["/.well-known/did.json","/did.json"], async (req, res) => {
   let jwks = await convertPemToJwk();
   // console.log(jwks);
@@ -18,28 +43,37 @@ didWebRouter.get(["/.well-known/did.json","/did.json"], async (req, res) => {
   }
   
   contorller = contorller.replace("https://","")
-  let didDoc = {
-    "@context": "https://www.w3.org/ns/did/v1",
-    id: `did:web:${contorller}`,
-    verificationMethod: [
-      {
-        id: `did:web:${contorller}#keys-1`, //"did:web:example.com#keys-1",
-        type: "JsonWebKey2020",
-        controller: `${contorller}`,
-        publicKeyJwk: jwks,
-      },
-    ],
-    authentication: [`${contorller}#keys-1`],
+  let didDoc = buildDidDocument(contorller, serviceURL, jwks);
 
-    service: [
-      {
-        id: `did:web:${contorller}#jwks`,
-        type: "JsonWebKey2020",
-        serviceEndpoint: `${serviceURL}/.well-known/jwks.json`,
-      },
-    ],
-  };
+  res.json(didDoc);
+});
 
+// Handle path-based DIDs like /diipv5/did.json for did:web:itb.ilabs.ai:diipv5
+// NOTE: All path-based DIDs (e.g., rfc-issuer, diipv5) currently use the same public key
+// from ./didjwks/did_public.pem. The key IDs differ (did:web:itb.ilabs.ai:rfc-issuer#keys-1
+// vs did:web:itb.ilabs.ai:diipv5#keys-1) because they include the DID identifier, but
+// the actual key material is the same. This is intentional - all path-based DIDs represent
+// different endpoints/deployments of the same issuer using shared key material.
+// If separate keys are needed for different DIDs, this would require path-based key selection.
+didWebRouter.get("/:path/did.json", async (req, res) => {
+  let jwks = await convertPemToJwk();
+  const pathSegment = req.params.path;
+  
+  let controller = serverURL;
+  let serviceURL = serverURL;
+  if (proxyPath) {
+    controller = serverURL.replace("/"+proxyPath,"") + ":" + proxyPath;
+    serviceURL = serverURL;
+  }
+  
+  // Build controller with path segment: e.g., "itb.ilabs.ai:diipv5"
+  controller = controller.replace("https://","").replace("http://","");
+  if (pathSegment) {
+    controller = `${controller}:${pathSegment}`;
+  }
+  
+  let didDoc = buildDidDocument(controller, serviceURL, jwks);
+  
   res.json(didDoc);
 });
 

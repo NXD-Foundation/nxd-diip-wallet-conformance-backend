@@ -53,6 +53,15 @@ const certificatePemX509 = fs.readFileSync(
   "./x509EC/client_certificate.crt",
   "utf8"
 );
+// DID Web key pair - must match the keys published in the DID document
+let privateKeyPemDidWeb = null;
+let publicKeyPemDidWeb = null;
+try {
+  privateKeyPemDidWeb = fs.readFileSync("./didjwks/did_private_pkcs8.key", "utf8");
+  publicKeyPemDidWeb = fs.readFileSync("./didjwks/did_public.pem", "utf8");
+} catch (e) {
+  console.warn("DID Web key files not found. did:web signature type may not work correctly.", e.message);
+}
 
 /**
  * Normalize COSE_Sign1 issuerAuth headers produced by @auth0/mdl.
@@ -292,10 +301,26 @@ export async function handleCredentialGenerationBasedOnFormat(
         x5c: [pemToBase64Der(certificatePemX509)],
       },
     };
-  } else { // Covers "jwk" and "kid-jwk"
-    const publicJwkForSigning = pemToJWK(publicKeyPem, "public");
+  } else { // Covers "jwk", "kid-jwk", and "did:web"
+    let publicJwkForSigning;
+    let privateJwkForSigning;
+    
+    // For did:web, use the DID Web key pair that matches the DID document
+    if (effectiveSignatureType === "did:web") {
+      if (!privateKeyPemDidWeb || !publicKeyPemDidWeb) {
+        throw new Error("DID Web key files not found. Cannot sign credentials with did:web signature type. Ensure ./didjwks/did_private_pkcs8.key and ./didjwks/did_public.pem exist.");
+      }
+      console.log("did:web signature type selected. Using DID Web key pair from ./didjwks/");
+      publicJwkForSigning = pemToJWK(publicKeyPemDidWeb, "public");
+      privateJwkForSigning = pemToJWK(privateKeyPemDidWeb, "private");
+    } else {
+      // For other signature types, use the default key pair
+      publicJwkForSigning = pemToJWK(publicKeyPem, "public");
+      privateJwkForSigning = pemToJWK(privateKey, "private");
+    }
+    
     ({ signer, verifier } = await createSignerVerifier(
-      pemToJWK(privateKey, "private"),
+      privateJwkForSigning,
       publicJwkForSigning
     ));
 
@@ -321,7 +346,7 @@ export async function handleCredentialGenerationBasedOnFormat(
       }
       controller = controller.replace("https://","").replace("http://","");
       const kid = `did:web:${controller}#keys-1`;
-      console.log(`Using KID: ${kid} for did:web signing.`);
+      console.log(`Using KID: ${kid} for did:web signing with DID Web key pair.`);
       joseHeader = { 
         kid: kid,
         alg: "ES256"
@@ -1093,9 +1118,27 @@ export async function handleCredentialGenerationBasedOnFormatDeferred(sessionObj
 
   const isHaip = sessionObject ? sessionObject.isHaip : false;
   if (!isHaip) {
+    // Determine which key pair to use based on signature type
+    let privateJwkForSigning;
+    let publicJwkForSigning;
+    
+    // For did:web, use the DID Web key pair that matches the DID document
+    if (effectiveSignatureType === "did:web") {
+      if (!privateKeyPemDidWeb || !publicKeyPemDidWeb) {
+        throw new Error("DID Web key files not found. Cannot sign credentials with did:web signature type. Ensure ./didjwks/did_private_pkcs8.key and ./didjwks/did_public.pem exist.");
+      }
+      console.log("did:web signature type selected for deferred issuance. Using DID Web key pair from ./didjwks/");
+      privateJwkForSigning = pemToJWK(privateKeyPemDidWeb, "private");
+      publicJwkForSigning = pemToJWK(publicKeyPemDidWeb, "public");
+    } else {
+      // For other signature types, use the default key pair
+      privateJwkForSigning = pemToJWK(privateKey, "private");
+      publicJwkForSigning = pemToJWK(publicKeyPem, "public");
+    }
+    
     ({ signer, verifier } = await createSignerVerifier(
-      pemToJWK(privateKey, "private"),
-      pemToJWK(publicKeyPem, "public")
+      privateJwkForSigning,
+      publicJwkForSigning
     ));
   }
 
