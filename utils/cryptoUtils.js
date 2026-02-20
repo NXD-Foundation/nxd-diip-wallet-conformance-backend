@@ -933,25 +933,7 @@ const base64urlDecode = (input) => {
 };
 
 export async function didKeyToJwks(did) {
-  if (did.startsWith("did:key:")) {
-    const keyDidResolver = getResolver();
-    const didResolver = new Resolver(keyDidResolver);
-
-    const resolutionResult = await didResolver.resolve(did);
-    const didDocument = resolutionResult.didDocument;
-    if (!didDocument || !didDocument.verificationMethod) {
-      console.error("Invalid DID Document for:", did);
-      throw new Error("Invalid DID Document structure.");
-    }
-    const jwks = {
-      keys: didDocument.verificationMethod.map((vm) => {
-        const jwk = vm.publicKeyJwk;
-        jwk.kid = vm.id;
-        return jwk;
-      }),
-    };
-    return jwks;
-  } else if (did.startsWith("did:web:")) {
+  if (did.startsWith("did:web:")) {
     // Handling did:web
     try {
       const [didPart] = did.split("#"); // we don't need the fragment for fetching did.json
@@ -1004,6 +986,7 @@ export async function didKeyToJwks(did) {
       throw e;
     }
   }
+  console.error("Unsupported DID type:", did);
   return null;
 }
 export async function fetchWalletMetadata(metadataUrl) {
