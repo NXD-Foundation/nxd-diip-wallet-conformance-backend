@@ -8,23 +8,27 @@ const serverURL = process.env.SERVER_URL || "http://localhost:3000";
 const proxyPath = process.env.PROXY_PATH || null;
 
 // Helper function to build DID document
+// References in authentication and assertionMethod MUST match verificationMethod.id exactly
+// (full DID URL, e.g. did:web:itb.ilabs.ai:diipv5#keys-1) so resolvers can dereference correctly.
 function buildDidDocument(controller, serviceURL, jwks) {
+  const did = `did:web:${controller}`;
+  const keyId = `${did}#keys-1`;
   return {
     "@context": "https://www.w3.org/ns/did/v1",
-    id: `did:web:${controller}`,
+    id: did,
     verificationMethod: [
       {
-        id: `did:web:${controller}#keys-1`, //"did:web:example.com#keys-1",
+        id: keyId,
         type: "JsonWebKey2020",
-        controller: `${controller}`,
+        controller: did,
         publicKeyJwk: jwks,
       },
     ],
-    authentication: [`${controller}#keys-1`],
-    assertionMethod: [`${controller}#keys-1`], // Required for credential signing
+    authentication: [keyId],
+    assertionMethod: [keyId],
     service: [
       {
-        id: `did:web:${controller}#jwks`,
+        id: `${did}#jwks`,
         type: "JsonWebKey2020",
         serviceEndpoint: `${serviceURL}/.well-known/jwks.json`,
       },
@@ -78,14 +82,15 @@ didWebRouter.get("/:path/did.json", async (req, res) => {
 });
 
 didWebRouter.get(["/.well-known/jwks.json"], async (req, res) => {
-  let contorller = serverURL;
+  let controller = serverURL;
   if (proxyPath) {
-    contorller = serverURL.replace("/"+proxyPath,"") + ":" + proxyPath;
+    controller = serverURL.replace("/"+proxyPath,"") + ":" + proxyPath;
   }
-  contorller = contorller.replace("https://","")
+  controller = controller.replace("https://","").replace("http://","");
+  const did = `did:web:${controller}`;
   let jwks = await convertPemToJwk();
   let result = {
-    keys: [{ ...jwks, use: "sig", kid: `${contorller}#keys-1` }],
+    keys: [{ ...jwks, use: "sig", kid: `${did}#keys-1` }],
   };
 
   res.json(result);
