@@ -46,7 +46,7 @@ didWebRouter.get(["/.well-known/did.json","/did.json"], async (req, res) => {
     serviceURL = serverURL //+ "/" + proxyPath;
   }
   
-  contorller = contorller.replace("https://","")
+  contorller = contorller.replace("https://","").replace("http://","");
   let didDoc = buildDidDocument(contorller, serviceURL, jwks);
 
   res.json(didDoc);

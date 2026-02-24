@@ -212,7 +212,7 @@
       },
       "credential_signing_alg_values_supported": ["ES256"],
       "format": "vc+sd-jwt",
-      "vct": "VerifiableIdCardJwtVc",
+
       "proof_types_supported": {
         "jwt": {
           "proof_signing_alg_values_supported": ["ES256"]

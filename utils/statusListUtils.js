@@ -15,6 +15,7 @@ import {
   statusListUpdateIndex,
 } from "../services/cacheServiceRedis.js";
 
+
 const serverURL = process.env.SERVER_URL || "http://localhost:3000";
 const proxyPath = process.env.PROXY_PATH || null;
 const issuerSignatureType = process.env.ISSUER_SIGNATURE_TYPE || "did:web"; // one of: did:web | did:jwk | x509
@@ -24,6 +25,7 @@ const privateKey = fs.readFileSync("./private-key.pem", "utf-8");
 let certificatePemX509 = null;
 let privateKeyPemX509 = null;
 let privateKeyPemDidWeb = null;
+let publicKeyPemDidWeb = null;
 try {
   certificatePemX509 = fs.readFileSync("./x509EC/client_certificate.crt", "utf8");
   privateKeyPemX509 = fs.readFileSync("./x509EC/ec_private_pkcs8.key", "utf8");
@@ -33,6 +35,7 @@ try {
 try {
   // DID:web private key to align with did:web DID document served by didweb routes
   privateKeyPemDidWeb = fs.readFileSync("./didjwks/did_private_pkcs8.key", "utf8");
+  publicKeyPemDidWeb = fs.readFileSync("./didjwks/did_public.pem", "utf8");
 } catch (e) {
   // optional, used when did:web is active and separate key material is provided
 }
@@ -357,15 +360,18 @@ class StatusListManager {
 
     // Choose the correct private key based on header/type to avoid mismatches
     // Align with issuance path in credGenerationUtils.js:
-    // - did:web and did:jwk -> ./private-key.pem
+    // - did:web -> ./didjwks/did_private_pkcs8.key (matches /.well-known/jwks.json)
+    // - did:jwk -> ./private-key.pem
     // - x509 -> ./x509EC/ec_private_pkcs8.key
     let pemToUse = privateKey;
     if (protectedHeader && protectedHeader.x5c && privateKeyPemX509) {
       pemToUse = privateKeyPemX509;
     } else if (effectiveSignatureType === "x509" && privateKeyPemX509) {
       pemToUse = privateKeyPemX509;
+    } else if (effectiveSignatureType === "did:web" && privateKeyPemDidWeb) {
+      pemToUse = privateKeyPemDidWeb;
     } else {
-      // did:web or did:jwk: always use the same key as issuance (./private-key.pem)
+      // did:jwk or fallback: use same key as issuance (./private-key.pem)
       pemToUse = privateKey;
     }
 
@@ -411,7 +417,10 @@ class StatusListManager {
       } else {
         expectedIssuer = computeDidWebFromServer().did;
       }
-      const publicKeyPem = fs.readFileSync("./public-key.pem", "utf-8");
+      // Use matching public key: did:web -> didjwks, did:jwk/x509 -> default
+      const publicKeyPem = (effectiveSignatureType === "did:web" && publicKeyPemDidWeb)
+        ? publicKeyPemDidWeb
+        : fs.readFileSync("./public-key.pem", "utf-8");
       const decoded = jwt.verify(token, publicKeyPem, {
         algorithms: ["ES256"],
         issuer: expectedIssuer,
