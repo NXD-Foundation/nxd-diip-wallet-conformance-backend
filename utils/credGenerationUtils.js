@@ -476,11 +476,31 @@ export async function handleCredentialGenerationBasedOnFormat(
       throw new Error(`Unsupported credential type: ${credType}`);
   }
 
-  // Handle holder binding
-  let cnf = { jwk: holderJWKS.jwk };
-  if (!cnf.jwk) {
+  // Handle holder binding (RFC 7800 cnf claim)
+  // For DID-based binding: use cnf.kid (DID) so verifiers resolve the DID to the key
+  // For JWK in header: use cnf.jwk directly
+  // For mDL: deviceKeyInfo requires JWK per ISO 18013-5, so we resolve DID→JWK when needed
+  const isDidKid = (kid) =>
+    kid &&
+    (kid.startsWith("did:key:") ||
+      kid.startsWith("did:web:") ||
+      kid.startsWith("did:jwk:"));
+
+  let cnf;
+  if (holderJWKS.jwk) {
+    cnf = { jwk: holderJWKS.jwk };
+  } else if (holderJWKS.kid && isDidKid(holderJWKS.kid)) {
+    // DID binding: put the DID in cnf.kid per RFC 7800 (key identified by reference)
+    cnf = { kid: holderJWKS.kid };
+  } else if (holderJWKS.kid) {
+    // Fallback: resolve kid to JWK (e.g. did:web, did:jwk when not matched above)
     const keys = await didKeyToJwks(holderJWKS.kid);
-    cnf = { jwk: keys.keys[0] };
+    cnf = keys?.keys?.[0] ? { jwk: keys.keys[0] } : null;
+  }
+  if (!cnf) {
+    throw new Error(
+      "Could not determine holder binding from proof JWT header (missing jwk or resolvable kid)"
+    );
   }
 
   const now = new Date();
@@ -617,6 +637,17 @@ export async function handleCredentialGenerationBasedOnFormat(
     const credential = jwt.sign(jwtPayload, privateKeyForSigning, signOptions);
     return credential;
   } else if (format === "mDL" || format === "mdl") {
+    // mDL deviceKeyInfo requires JWK per ISO 18013-5; resolve DID to JWK if cnf has kid
+    let cnfForMdl = cnf;
+    if (cnf.kid && !cnf.jwk && isDidKid(cnf.kid)) {
+      const keys = await didKeyToJwks(cnf.kid);
+      if (!keys?.keys?.[0]) {
+        throw new Error(
+          `mDL requires device key as JWK; could not resolve DID: ${cnf.kid}`
+        );
+      }
+      cnfForMdl = { jwk: keys.keys[0] };
+    }
     console.log("Generating mDL credential using @auth0/mdl library...");
     try {
       return await generateMdlCredentialWithAuth0Library(
@@ -625,7 +656,7 @@ export async function handleCredentialGenerationBasedOnFormat(
         serverURL,
         vct,
         credPayload,
-        cnf,
+        cnfForMdl,
         issuerConfigValues,
       );
     } catch (error) {
@@ -1419,11 +1450,27 @@ export async function handleCredentialGenerationBasedOnFormatDeferred(
       throw new Error(`Unsupported credential type: ${credType}`);
   }
 
-  // Handle holder binding
-  let cnf = { jwk: holderJWKS.jwk };
-  if (!cnf.jwk) {
+  // Handle holder binding (RFC 7800 cnf claim)
+  // For DID-based binding: use cnf.kid (DID) so verifiers resolve the DID to the key
+  const isDidKid = (kid) =>
+    kid &&
+    (kid.startsWith("did:key:") ||
+      kid.startsWith("did:web:") ||
+      kid.startsWith("did:jwk:"));
+
+  let cnf;
+  if (holderJWKS.jwk) {
+    cnf = { jwk: holderJWKS.jwk };
+  } else if (holderJWKS.kid && isDidKid(holderJWKS.kid)) {
+    cnf = { kid: holderJWKS.kid };
+  } else if (holderJWKS.kid) {
     const keys = await didKeyToJwks(holderJWKS.kid);
-    cnf = { jwk: keys?.keys?.[0] };
+    cnf = keys?.keys?.[0] ? { jwk: keys.keys[0] } : null;
+  }
+  if (!cnf) {
+    throw new Error(
+      "Could not determine holder binding from proof JWT header (missing jwk or resolvable kid)"
+    );
   }
 
   // Prepare issuance headers (DIIP v5: typ MUST be dc+sd-jwt for SD-JWT credentials)

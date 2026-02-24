@@ -933,7 +933,27 @@ const base64urlDecode = (input) => {
 };
 
 export async function didKeyToJwks(did) {
-  if (did.startsWith("did:web:")) {
+  if (did.startsWith("did:key:")) {
+    try {
+      const keyDidResolver = getResolver();
+      const didResolver = new Resolver(keyDidResolver);
+      const resolutionResult = await didResolver.resolve(did);
+      const didDocument = resolutionResult.didDocument;
+      if (!didDocument || !didDocument.verificationMethod) {
+        throw new Error("Invalid DID Document structure.");
+      }
+      return {
+        keys: didDocument.verificationMethod.map((vm) => {
+          const jwk = { ...vm.publicKeyJwk };
+          jwk.kid = vm.id;
+          return jwk;
+        }),
+      };
+    } catch (e) {
+      console.error("Error resolving did:key", e);
+      throw e;
+    }
+  } else if (did.startsWith("did:web:")) {
     // Handling did:web
     try {
       const [didPart] = did.split("#"); // we don't need the fragment for fetching did.json

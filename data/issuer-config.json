@@ -17,7 +17,7 @@
     
     "VerifiablePortableDocumentA1SDJWT": {
       "scope": "VerifiablePortableDocumentA1SDJWT",
-      "cryptographic_binding_methods_supported": ["jwk"],
+      "cryptographic_binding_methods_supported": ["jwk","did:web","did:jwk"],
       "credential_metadata": {
         "display": [
           {
@@ -69,7 +69,7 @@
 
     "VerifiablePortableDocumentA2SDJWT": {
       "scope": "VerifiablePortableDocumentA2SDJWT",
-      "cryptographic_binding_methods_supported": ["jwk"],
+      "cryptographic_binding_methods_supported": ["jwk","did:web","did:jwk"],
       "credential_metadata": {
         "display": [
           {
@@ -121,7 +121,7 @@
 
     "VerifiableIdCardJwtVc": {
       "scope": "VerifiableIdCard",
-      "cryptographic_binding_methods_supported": ["jwk"],
+      "cryptographic_binding_methods_supported": ["jwk","did:web","did:jwk"],
       "credential_metadata": {
         "display": [
           {
@@ -228,7 +228,7 @@
 
     "VerifiablePIDSDJWT": {
       "scope": "PID",
-      "cryptographic_binding_methods_supported": ["jwk"],
+      "cryptographic_binding_methods_supported": ["jwk","did:web","did:jwk"],
       "credential_metadata": {
         "display": [
           {
@@ -329,7 +329,7 @@
 
     "VerifiableePassportCredentialSDJWT": {
       "scope": "ePassportCredential",
-      "cryptographic_binding_methods_supported": ["jwk"],
+      "cryptographic_binding_methods_supported": ["jwk","did:web","did:jwk"],
       "credential_metadata": {
         "display": [
           {
@@ -512,7 +512,7 @@
 
     "VerifiableStudentIDSDJWT": {
       "scope": "StudentID",
-      "cryptographic_binding_methods_supported": ["jwk"],
+      "cryptographic_binding_methods_supported": ["jwk","did:web","did:jwk"],
       "credential_metadata": {
         "display": [
           {
@@ -676,7 +676,7 @@
 
     "VerifiableFerryBoardingPassCredentialSDJWT": {
       "scope": "ferryBoardingPassCredential",
-      "cryptographic_binding_methods_supported": ["jwk"],
+      "cryptographic_binding_methods_supported": ["jwk","did:web","did:jwk"],
       "credential_metadata": {
         "display": [
           {
@@ -831,7 +831,7 @@
 
     "VerifiableReceipt": {
       "scope": "vReceipt",
-      "cryptographic_binding_methods_supported": ["jwk"],
+      "cryptographic_binding_methods_supported": ["jwk","did:web","did:jwk"],
       "credential_metadata": {
         "display": [
           {
@@ -994,7 +994,7 @@
 
     "urn:eu.europa.ec.eudi:pid:1": {
       "scope": "urn:eu.europa.ec.eudi:pid:1",
-      "cryptographic_binding_methods_supported": ["jwk"],
+      "cryptographic_binding_methods_supported": ["jwk","did:web","did:jwk"],
       "credential_metadata": {
         "display": [
           {
@@ -1202,7 +1202,7 @@
 
     "PaymentWalletAttestation": {
       "scope": "PaymentWalletAttestation",
-      "cryptographic_binding_methods_supported": ["jwk"],
+      "cryptographic_binding_methods_supported": ["jwk","did:web","did:jwk"],
       "credential_metadata": {
         "display": [
           {
@@ -1350,7 +1350,7 @@
 
     "PhotoID": {
       "scope": "PhotoID",
-      "cryptographic_binding_methods_supported": ["jwk"],
+      "cryptographic_binding_methods_supported": ["jwk","did:web","did:jwk"],
       "credential_metadata": {
         "display": [
           {
@@ -1907,7 +1907,7 @@
 
     "PCD": {
       "scope": "PCD",
-      "cryptographic_binding_methods_supported": ["jwk"],
+      "cryptographic_binding_methods_supported": ["jwk","did:web","did:jwk"],
       "credential_metadata": {
         "display": [
           {
@@ -2000,7 +2000,7 @@
 
     "LoyaltyCard": {
       "scope": "LoyaltyCard",
-      "cryptographic_binding_methods_supported": ["jwk"],
+      "cryptographic_binding_methods_supported": ["jwk","did:web","did:jwk"],
       "credential_metadata": {
         "display": [
           {
