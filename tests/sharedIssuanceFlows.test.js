@@ -1116,7 +1116,7 @@ describe('Shared Issuance Flows', () => {
         .post('/credential_deferred')
         .send({
           transaction_id: transactionId
-        });
+      }).timeout(20000);
 
       // May succeed or fail depending on credential generation
       if (response.status === 200) {

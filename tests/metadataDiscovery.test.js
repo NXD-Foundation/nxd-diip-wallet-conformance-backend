@@ -1835,7 +1835,8 @@ describe('OIDC4VCI V1.0 - Authorization Details (RFC 9396) Requirements', () => 
 
       const configurations = res.body.credential_configurations_supported || {};
       Object.entries(configurations).forEach(([configId, config]) => {
-        if (config?.format === 'vc+sd-jwt' || config?.format === 'dc+sd-jwt') {
+        // SD-JWT VC (dc+sd-jwt) uses vct claim; VCDM 2.0 vc+sd-jwt uses VCDM type instead
+        if (config?.format === 'dc+sd-jwt') {
           expect(config, `${configId} must include vct for SD-JWT VC`).to.have.property('vct');
           expect(config.vct, `${configId} vct must be non-empty string`).to.be.a('string').and.not.empty;
         }
@@ -2005,8 +2006,8 @@ describe('OIDC4VCI V1.0 - Format-Specific Requirements', () => {
       const configurations = response.body.credential_configurations_supported;
       
       Object.entries(configurations).forEach(([configId, config]) => {
-        // SD-JWT VC formats: 'vc+sd-jwt' or 'dc+sd-jwt'
-        if (config.format === 'vc+sd-jwt' || config.format === 'dc+sd-jwt') {
+        // SD-JWT VC format: 'dc+sd-jwt' (compact claims with vct)
+        if (config.format === 'dc+sd-jwt') {
           expect(config, `SD-JWT VC configuration ${configId} must have vct parameter`)
             .to.have.property('vct');
           expect(config.vct, `vct in ${configId} must be a string`)
@@ -2025,7 +2026,8 @@ describe('OIDC4VCI V1.0 - Format-Specific Requirements', () => {
       const configurations = response.body.credential_configurations_supported;
       
       Object.entries(configurations).forEach(([configId, config]) => {
-        if (config.format === 'vc+sd-jwt' || config.format === 'dc+sd-jwt') {
+        // Only SD-JWT VC (dc+sd-jwt) uses vct; vc+sd-jwt uses VCDM 2.0 type
+        if (config.format === 'dc+sd-jwt') {
           const vct = config.vct;
           
           // VCT should follow URI or string identifier pattern
@@ -2051,7 +2053,8 @@ describe('OIDC4VCI V1.0 - Format-Specific Requirements', () => {
       const configurations = response.body.credential_configurations_supported;
       
       Object.entries(configurations).forEach(([configId, config]) => {
-        if (config.format === 'vc+sd-jwt' || config.format === 'dc+sd-jwt') {
+        // Only SD-JWT VC (dc+sd-jwt) links configuration to schema via vct
+        if (config.format === 'dc+sd-jwt') {
           // VCT links configuration to schema
           expect(config.vct).to.exist;
           
@@ -2302,10 +2305,17 @@ describe('OIDC4VCI V1.0 - Format-Specific Requirements', () => {
       Object.entries(configurations).forEach(([configId, config]) => {
         // Format validation rules
         switch (config.format) {
-          case 'vc+sd-jwt':
           case 'dc+sd-jwt':
             expect(config, `SD-JWT VC ${configId} requires vct`)
               .to.have.property('vct');
+            break;
+          
+          case 'vc+sd-jwt':
+            // VCDM 2.0 vc+sd-jwt uses credential_definition/type, not vct
+            expect(config, `VCDM 2.0 vc+sd-jwt ${configId} MUST NOT use vct`)
+              .to.not.have.property('vct');
+            expect(config, `VCDM 2.0 vc+sd-jwt ${configId} requires credential_definition`)
+              .to.have.property('credential_definition');
             break;
             
           case 'mso_mdoc':
@@ -2348,8 +2358,8 @@ describe('OIDC4VCI V1.0 - Format-Specific Requirements', () => {
         const format = config.format;
         expect(format).to.exist;
         
-        // SD-JWT VC → vct
-        if (format.includes('sd-jwt')) {
+        // SD-JWT VC (dc+sd-jwt) → vct
+        if (format === 'dc+sd-jwt') {
           expect(config).to.have.property('vct');
         }
         

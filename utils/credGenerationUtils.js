@@ -10,7 +10,11 @@ import { pemToJWK, generateNonce, didKeyToJwks } from "../utils/cryptoUtils.js";
 import fs from "fs";
 import { SDJwtVcInstance } from "@sd-jwt/sd-jwt-vc";
 
-/** DIIP v5: JWT typ header for SD-JWT credentials (OID4VCI format identifier dc+sd-jwt). */
+/** DIIP v5: JWT typ header for SD-JWT credentials 
+ * https://www.w3.org/TR/vc-jose-cose/?utm_source=chatgpt.com#securing-with-sd-jwt 
+ * The typ header parameter SHOULD be vc+sd-jwt. When present, the cty header parameter SHOULD be vc.*/
+const VCDM_2_0_SD_JWT_CREDENTIAL_TYP_HEADER = "vc+sd-jwt";
+
 const SDJWT_CREDENTIAL_TYP_HEADER = "dc+sd-jwt";
 
 // Standardize on 'cbor' library for EUDI Wallet compliance (matches ISO 18013-5 spec)
@@ -550,7 +554,7 @@ export async function handleCredentialGenerationBasedOnFormat(
     const vcSdJwtHeader = {
       header: {
         ...headerOptions.header,
-        typ: SDJWT_CREDENTIAL_TYP_HEADER,
+        typ: VCDM_2_0_SD_JWT_CREDENTIAL_TYP_HEADER,
         cty: "vc",
       },
     };
@@ -560,7 +564,7 @@ export async function handleCredentialGenerationBasedOnFormat(
       vcSdJwtHeader,
     );
     console.log(
-      "Credential issued (vc+sd-jwt VCDM 2.0, typ=dc+sd-jwt): ",
+      "Credential issued (vc+sd-jwt VCDM 2.0, typ=vc+sd-jwt): ",
       credential,
     );
     return credential;
@@ -1473,6 +1477,7 @@ export async function handleCredentialGenerationBasedOnFormatDeferred(
     );
   }
 
+  //TODO this should be update to check format before deciding on the typ of the header
   // Prepare issuance headers (DIIP v5: typ MUST be dc+sd-jwt for SD-JWT credentials)
   const headerOptions = isHaip
     ? {
